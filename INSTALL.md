@@ -17,6 +17,13 @@ MCP host it finds (idempotent), and runs an MCP handshake smoke test. Preview
 without changing any config: `DRY_RUN=1 ./install.sh`. Other targets:
 `make build`, `make test`, `make smoke`, `make clean`.
 
+Registering the server only makes the tools *visible*. To also tell each host to
+*prefer delegating* code work to jindo (and to pin model/effort well), opt in
+with `JINDO_WRITE_GUIDANCE=1 ./install.sh`: it injects a fenced, idempotent
+usage block (from [docs/host-guidance.md](docs/host-guidance.md)) into
+`~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`, backing up each file first and
+replacing any prior block in place. Omit the flag to leave those files untouched.
+
 The rest of this document is the manual per-host setup (what the script
 automates) and runtime notes.
 

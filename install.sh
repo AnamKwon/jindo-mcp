@@ -11,6 +11,42 @@ BIN="$ROOT/jindo-mcp"
 
 run() { if [ "$DRY_RUN" = 1 ]; then echo "    [dry-run] $*"; else eval "$*"; fi; }
 
+# Canonical jindo usage guidance and the fenced markers used to manage it in a
+# host instruction file. Registering the server only makes the TOOLS visible;
+# this block is the behavioral policy that makes a host actually PREFER
+# delegating to jindo (and route/effort well). It is opt-in (see below).
+GUIDANCE_FILE="$ROOT/docs/host-guidance.md"
+GUIDANCE_BEGIN="<!-- jindo:begin — managed by jindo install.sh; edits inside are overwritten on reinstall -->"
+GUIDANCE_END="<!-- jindo:end -->"
+
+# inject_guidance TARGET — idempotently write the jindo usage block into a host
+# instruction file. Any prior jindo block (between the markers) is stripped and a
+# fresh one appended, so reinstalling updates it in place instead of duplicating.
+# The file is backed up first; DRY_RUN only reports.
+inject_guidance() {
+  local target="$1"
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "    [dry-run] would inject jindo guidance block into $target"
+    return
+  fi
+  mkdir -p "$(dirname "$target")"
+  [ -f "$target" ] && cp "$target" "$target.bak-jindo-$(date +%Y%m%d-%H%M%S)"
+  {
+    if [ -f "$target" ]; then
+      awk -v b="$GUIDANCE_BEGIN" -v e="$GUIDANCE_END" '
+        index($0,b){inblk=1; next}
+        inblk && index($0,e){inblk=0; next}
+        !inblk{print}
+      ' "$target"
+    fi
+    printf '\n%s\n' "$GUIDANCE_BEGIN"
+    cat "$GUIDANCE_FILE"
+    printf '%s\n' "$GUIDANCE_END"
+  } > "$target.jindo-tmp"
+  mv "$target.jindo-tmp" "$target"
+  echo "    injected: $target"
+}
+
 echo "==> Building jindo-mcp"
 ( cd "$ROOT" && go build -o "$BIN" ./cmd/jindo-mcp )
 echo "    built: $BIN"
@@ -51,6 +87,21 @@ if command -v agy >/dev/null 2>&1; then
   echo "      { \"mcpServers\": { \"jindo\": { \"command\": \"$BIN\", \"args\": [] } } }"
 fi
 [ "$registered" = 0 ] && echo "    (no auto-registering host CLI found; see INSTALL.md for manual setup)"
+
+# Optionally inject the jindo usage guidance into host instruction files so a
+# host doesn't merely SEE the tools but is told to prefer delegating to jindo
+# (and to pin model/effort well). Opt-in: silently editing a user's global
+# instruction files is surprising, so this only runs when explicitly requested.
+if [ "${JINDO_WRITE_GUIDANCE:-0}" = 1 ]; then
+  echo "==> Injecting jindo usage guidance (JINDO_WRITE_GUIDANCE=1)"
+  command -v codex  >/dev/null 2>&1 && inject_guidance "$HOME/.codex/AGENTS.md"
+  command -v claude >/dev/null 2>&1 && inject_guidance "$HOME/.claude/CLAUDE.md"
+else
+  echo "==> Guidance injection skipped."
+  echo "    Re-run with JINDO_WRITE_GUIDANCE=1 to add a jindo usage block to"
+  echo "    ~/.codex/AGENTS.md and ~/.claude/CLAUDE.md (so hosts prefer delegating"
+  echo "    to jindo, not just see the tools). Idempotent; backs up each file first."
+fi
 
 # Confirm the binary actually speaks MCP.
 echo "==> Smoke test (MCP handshake)"
