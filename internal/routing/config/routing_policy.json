@@ -1,0 +1,130 @@
+{
+  "signals": {
+    "security": {
+      "weight": 3.0,
+      "patterns": [
+        "auth",
+        "password",
+        "token",
+        "secret",
+        "encrypt",
+        "decrypt",
+        "credential",
+        "permission",
+        "privilege",
+        "vulnerab",
+        "injection",
+        "sanitize",
+        "certificate",
+        "sensitive",
+        "access control",
+        "sql",
+        "csrf",
+        "xss",
+        "jwt",
+        "hash",
+        "tls",
+        "ssl"
+      ]
+    },
+    "constraints": {
+      "weight": 1.5,
+      "patterns": [
+        "must",
+        "should",
+        "only",
+        "validat",
+        "retry",
+        "timeout",
+        "transaction",
+        "edge case",
+        "atomic",
+        "idempotent",
+        "rollback",
+        "constraint",
+        "requirement",
+        "invariant",
+        "race condition",
+        "concurren",
+        "thread",
+        "rate limit",
+        "async",
+        "parallel",
+        "lock"
+      ]
+    },
+    "scope": {
+      "weight": 1.2,
+      "patterns": [
+        "refactor",
+        "architecture",
+        "across",
+        "multiple",
+        "service",
+        "module",
+        "migrate",
+        "integrate",
+        "system",
+        "pipeline",
+        "end-to-end",
+        "cross-cutting",
+        "distributed",
+        "orchestrat",
+        "implement",
+        "endpoint",
+        "api",
+        "feature",
+        "component",
+        "function"
+      ]
+    },
+    "ambiguity": {
+      "weight": 0.8,
+      "patterns": [
+        "somehow",
+        "etc",
+        "and so on",
+        "optimize",
+        "improve",
+        "better",
+        "appropriate",
+        "robust",
+        "flexible",
+        "scalable",
+        "clean",
+        "efficient",
+        "as needed",
+        "handle everything",
+        "production-grade"
+      ]
+    }
+  },
+  "thresholds": {
+    "standard": 1.0,
+    "hard": 6.0
+  },
+  "ambiguous_band": {
+    "width": 1.0
+  },
+  "llm_routing": {
+    "enabled": false,
+    "router_cli": "claude",
+    "router_model": "claude-haiku-4-5"
+  },
+  "llm_assess": {
+    "enabled": true,
+    "bands": {
+      "standard": [0.7, 1.3],
+      "hard": [5.0, 7.0]
+    }
+  },
+  "dev_eval": {
+    "enabled": false,
+    "alternative_strategy": "other_agent",
+    "evaluator": { "weights": { "objective": 0.5, "judge": 0.5 } }
+  },
+  "capability_routing": {
+    "enabled": false,
+    "strategy": "difficulty_match"
+  }
+}

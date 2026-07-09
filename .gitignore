@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+.jindo/
+/jindo-mcp
+.DS_Store
+.serena/
+.claude/loop/state/
+.claude/loop/events/

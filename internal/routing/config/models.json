@@ -1,0 +1,58 @@
+{
+  "agents": {
+    "claude": {
+      "trivial": "claude-haiku-4-5",
+      "standard": "claude-sonnet-5",
+      "hard": "claude-opus-4-8"
+    },
+    "codex": {
+      "trivial": "gpt-5.4-mini",
+      "standard": "gpt-5.3-codex-spark",
+      "hard": "gpt-5.5"
+    },
+    "agy": {
+      "trivial": "Gemini 3.5 Flash (Low)",
+      "standard": "Gemini 3.1 Pro (Low)",
+      "hard": "Gemini 3.1 Pro (High)"
+    }
+  },
+  "default_agent_by_difficulty": {
+    "trivial": "agy",
+    "standard": "claude",
+    "hard": "codex"
+  },
+  "effort_by_difficulty": {
+    "trivial": "low",
+    "standard": "medium",
+    "hard": "high"
+  },
+  "profiles": {
+    "claude": {
+      "strength": {
+        "security": 0.5,
+        "constraints": 0.8,
+        "scope": 0.9,
+        "ambiguity": 0.6
+      },
+      "cost_rank": 2
+    },
+    "codex": {
+      "strength": {
+        "security": 1.0,
+        "constraints": 0.9,
+        "scope": 0.6,
+        "ambiguity": 0.4
+      },
+      "cost_rank": 3
+    },
+    "agy": {
+      "strength": {
+        "security": 0.5,
+        "constraints": 0.5,
+        "scope": 0.5,
+        "ambiguity": 0.7
+      },
+      "cost_rank": 1
+    }
+  }
+}

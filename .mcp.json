@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "jindo": {
+      "type": "stdio",
+      "command": "${CLAUDE_PROJECT_DIR:-.}/jindo-mcp",
+      "args": []
+    }
+  }
+}
