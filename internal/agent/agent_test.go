@@ -2,7 +2,9 @@ package agent
 
 import (
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -226,5 +228,35 @@ func TestWrapExecErr_nonExitErrorPassthrough(t *testing.T) {
 	}
 	if out != "out" {
 		t.Errorf("wrapExecErr output = %q, want %q", out, "out")
+	}
+}
+
+// TestAvailable exercises the PATH-probe availability check. It cannot assert a
+// specific true/false for the real CLIs (they may or may not be installed on
+// the machine running the test), so it only asserts the known agents run
+// without panicking and return a bool, and that an unknown name is always
+// false (no binary to resolve). A synthetic PATH with a stub binary pins the
+// "installed" branch deterministically for one adapter.
+func TestAvailable(t *testing.T) {
+	for _, name := range []string{"claude", "codex", "agy"} {
+		_ = Available(name) // must not panic; value is environment-dependent.
+	}
+	if Available("nope") {
+		t.Errorf("Available(%q) = true, want false for an unknown agent", "nope")
+	}
+	if Available("") {
+		t.Errorf("Available(\"\") = true, want false for an unknown agent")
+	}
+
+	// Deterministic installed branch: put an executable named "claude" on a
+	// PATH we control and confirm Available finds it.
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "claude")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write stub binary: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	if !Available("claude") {
+		t.Errorf("Available(\"claude\") = false with stub on PATH, want true")
 	}
 }

@@ -463,6 +463,38 @@ func rationaleFor(s Score) Rationale {
 // own contract of always returning a tier from a closed set.
 var Assessor func(task string, score Score) (tier string, ok bool)
 
+// AgentAvailable, when non-nil, reports whether a given agent's CLI is actually
+// installed (resolvable on PATH). It is a package-level seam (nil by default)
+// that mirrors Assessor: routing must NOT import internal/agent (that would be
+// an import cycle, since agent-side code routes), so the availability probe is
+// injected here — cmd/jindo-mcp wires it to agent.Available at startup.
+//
+// nil ⇒ every agent is treated as usable, reproducing the pre-availability
+// behavior exactly. This is the backward-compat guarantee for tests and library
+// callers that never set the seam: routing still picks from the full table.
+var AgentAvailable func(name string) bool
+
+// agentUsable reports whether the named agent may be selected. With the seam
+// unset (nil), every agent is usable (backward compat); otherwise it defers to
+// the injected probe. It is the single gate every selection point consults, so
+// "installed?" is asked in exactly one place.
+func agentUsable(name string) bool {
+	return AgentAvailable == nil || AgentAvailable(name)
+}
+
+// AgentAvailability returns, for every agent in the embedded models table,
+// whether it is currently usable (see agentUsable). It is exposed for the tool
+// layer (the MCP "agents" tool) to report install availability alongside the
+// model table. With the seam unset every entry is true. A fresh map is returned
+// so callers cannot mutate package state.
+func AgentAvailability() map[string]bool {
+	out := make(map[string]bool, len(loadedModels.Agents))
+	for agent := range loadedModels.Agents {
+		out[agent] = agentUsable(agent)
+	}
+	return out
+}
+
 // llmAssessEnvVar gates Assessor invocation in addition to the policy's
 // llm_assess.enabled flag (defense-in-depth double gate): even a policy
 // config that enables assessment does nothing unless the process explicitly
@@ -537,6 +569,9 @@ func chooseByProfile(difficulty string, matched map[string]float64, priority str
 	names := make([]string, 0, len(loadedModels.Agents))
 	for agent, tiers := range loadedModels.Agents {
 		if agent == exclude {
+			continue
+		}
+		if !agentUsable(agent) {
 			continue
 		}
 		if _, ok := tiers[difficulty]; ok {
@@ -734,6 +769,13 @@ func SelectModel(task string, agent string, priority string, model string) (Sele
 			resolvedAgent = matches[0]
 		}
 
+		// A pinned model is worthless if its agent's CLI is not installed: the
+		// dispatch would fail with "command not found". Surface it as a clear
+		// routing error instead (there is no fallback for an explicit pin).
+		if !agentUsable(resolvedAgent) {
+			return Selection{}, fmt.Errorf("routing: agent %q (for model %q) is not installed", resolvedAgent, model)
+		}
+
 		// Difficulty LABEL for logging: the tier whose model slot equals model,
 		// else the literal "explicit". Iterate tiers in sorted order so a
 		// (degenerate) duplicate-model table still yields a deterministic label.
@@ -766,6 +808,12 @@ func SelectModel(task string, agent string, priority string, model string) (Sele
 	switch {
 	case agent != "":
 		// Explicit override wins exactly as before; profile selection skipped.
+		// But an override naming an uninstalled agent cannot be honored, and
+		// (unlike the score/profile paths) there is nothing to fall back to, so
+		// surface a clear error rather than dispatching to a missing CLI.
+		if !agentUsable(agent) {
+			return Selection{}, fmt.Errorf("routing: agent %q is not installed", agent)
+		}
 		rationale.ProfileMatch = &ProfileMatch{
 			Chosen: agent,
 			Reason: "explicit agent override; profile selection skipped",
@@ -787,10 +835,27 @@ func SelectModel(task string, agent string, priority string, model string) (Sele
 		if !ok {
 			return Selection{}, fmt.Errorf("routing: no default agent for difficulty %q", difficulty)
 		}
-		agent = def
+		if agentUsable(def) {
+			agent = def
+			rationale.ProfileMatch = &ProfileMatch{
+				Chosen: agent,
+				Reason: fmt.Sprintf("no profiles configured; fell back to default_agent_by_difficulty[%q]=%q", difficulty, agent),
+			}
+			break
+		}
+		// The default agent is not installed: fall back to profile-style
+		// coverage selection over the USABLE candidates (chooseByProfile now
+		// filters them), so a missing default degrades gracefully to an
+		// available agent instead of erroring outright.
+		chosen, cands := chooseByProfile(difficulty, rationale.Matched, priority, "")
+		if chosen == "" {
+			return Selection{}, fmt.Errorf("routing: no installed agent for difficulty %q", difficulty)
+		}
+		agent = chosen
 		rationale.ProfileMatch = &ProfileMatch{
-			Chosen: agent,
-			Reason: fmt.Sprintf("no profiles configured; fell back to default_agent_by_difficulty[%q]=%q", difficulty, agent),
+			Candidates: cands,
+			Chosen:     chosen,
+			Reason:     fmt.Sprintf("default_agent_by_difficulty[%q]=%q not installed; fell back to installed candidate %q", difficulty, def, chosen),
 		}
 	}
 
@@ -900,6 +965,9 @@ func SelectReviewers(task string, priority string, excludeAuthor string) ([]Sele
 	sels := make([]Selection, 0, len(names))
 	for _, agent := range names {
 		if agent == excludeAuthor {
+			continue
+		}
+		if !agentUsable(agent) {
 			continue
 		}
 		model, ok := loadedModels.Agents[agent][difficulty]

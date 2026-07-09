@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# jindo-mcp installer — build the binary and register it with whichever MCP
+# hosts (Claude Code / Codex CLI / agy) are present. Idempotent.
+# Usage:  ./install.sh          register for real
+#         DRY_RUN=1 ./install.sh   build + detect + smoke only (no config changes)
+set -euo pipefail
+
+DRY_RUN="${DRY_RUN:-0}"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+BIN="$ROOT/jindo-mcp"
+
+run() { if [ "$DRY_RUN" = 1 ]; then echo "    [dry-run] $*"; else eval "$*"; fi; }
+
+echo "==> Building jindo-mcp"
+( cd "$ROOT" && go build -o "$BIN" ./cmd/jindo-mcp )
+echo "    built: $BIN"
+
+# The agent CLIs jindo dispatches TO (author/reviewer). jindo can only route to
+# the ones installed here — a missing CLI makes any dispatch to it fail.
+echo "==> Sub-agent CLIs on PATH (jindo routes tasks to these):"
+for a in claude codex agy; do
+  if command -v "$a" >/dev/null 2>&1; then
+    echo "    [x] $a"
+  else
+    echo "    [ ] $a   (not found — jindo cannot route to \"$a\" until installed)"
+  fi
+done
+
+# Register the jindo MCP server with each host that is present.
+echo "==> Registering jindo with detected MCP hosts:"
+registered=0
+if command -v claude >/dev/null 2>&1; then
+  echo "  - Claude Code"
+  run "claude mcp remove jindo >/dev/null 2>&1 || true"
+  run "claude mcp add jindo -- \"$BIN\""
+  registered=1
+fi
+if command -v codex >/dev/null 2>&1; then
+  echo "  - Codex CLI"
+  run "codex mcp remove jindo >/dev/null 2>&1 || true"
+  run "codex mcp add jindo -- \"$BIN\""
+  echo "    NOTE: 'codex mcp add' does not set timeouts or open the sandbox."
+  echo "          Add startup_timeout_sec/tool_timeout_sec to [mcp_servers.jindo] in"
+  echo "          ~/.codex/config.toml, and run codex with a danger-full-access sandbox"
+  echo "          (dispatch spawns sub-agents). See INSTALL.md."
+  registered=1
+fi
+if command -v agy >/dev/null 2>&1; then
+  echo "  - agy (Antigravity/Gemini): register manually under mcpServers in your"
+  echo "    ~/.gemini MCP config (see INSTALL.md):"
+  echo "      { \"mcpServers\": { \"jindo\": { \"command\": \"$BIN\", \"args\": [] } } }"
+fi
+[ "$registered" = 0 ] && echo "    (no auto-registering host CLI found; see INSTALL.md for manual setup)"
+
+# Confirm the binary actually speaks MCP.
+echo "==> Smoke test (MCP handshake)"
+if printf '%s\n%s\n' \
+     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+     '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | "$BIN" | grep -q '"jindo-mcp"'; then
+  echo "    OK: jindo-mcp responds and lists its tools"
+else
+  echo "    FAIL: no MCP response from $BIN" >&2
+  exit 1
+fi
+
+echo "==> Done. Open a NEW host session to pick up the jindo server."

@@ -298,6 +298,28 @@ func TestToolsCallAgents(t *testing.T) {
 			t.Fatalf("agents content missing %q: %s", name, text)
 		}
 	}
+	// The result carries BOTH the routing table and a per-agent install
+	// availability map. With the seam unset (as in tests) every agent is
+	// available, so decode the payload and assert the "available" map is present
+	// and reports true for each agent.
+	var payload struct {
+		Agents    map[string]map[string]string `json:"agents"`
+		Available map[string]bool              `json:"available"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		t.Fatalf("decode agents result: %v (text=%s)", err, text)
+	}
+	if len(payload.Agents) == 0 {
+		t.Fatalf("agents result missing the routing table: %s", text)
+	}
+	if len(payload.Available) == 0 {
+		t.Fatalf("agents result missing the availability map: %s", text)
+	}
+	for _, name := range []string{"claude", "codex", "agy"} {
+		if !payload.Available[name] {
+			t.Fatalf("available[%q] = false, want true (seam unset): %s", name, text)
+		}
+	}
 }
 
 func TestMalformedJSONLine(t *testing.T) {

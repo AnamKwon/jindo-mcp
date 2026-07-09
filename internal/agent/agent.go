@@ -143,6 +143,22 @@ func NewAgy() *cliAdapter {
 	return &cliAdapter{name: "agy", cli: "agy", kind: kindClaudeLike, Exec: defaultExec}
 }
 
+// Available reports whether the named agent's CLI binary is resolvable on PATH,
+// i.e. a dispatch to it would find a command to exec rather than failing with
+// "command not found". It resolves the name to its adapter (and thus its actual
+// CLI binary) via GetAdapter, then probes PATH with exec.LookPath. An unknown
+// name has no binary to look up, so it returns false. The binary names happen
+// to equal the agent names today (claude/codex/agy), but going through the
+// adapter keeps the name->binary mapping in the single place that owns it.
+func Available(name string) bool {
+	a, err := GetAdapter(name)
+	if err != nil {
+		return false
+	}
+	_, err = exec.LookPath(a.cli)
+	return err == nil
+}
+
 // GetAdapter returns the named adapter or an error for unknown names.
 func GetAdapter(name string) (*cliAdapter, error) {
 	switch name {

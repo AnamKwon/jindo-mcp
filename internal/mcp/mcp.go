@@ -407,7 +407,7 @@ func tools() []toolDef {
 		},
 		{
 			Name:        "agents",
-			Description: "List the agent -> difficulty -> model routing table",
+			Description: "List the agent -> difficulty -> model routing table, plus a per-agent map reporting whether each agent's CLI is installed (available)",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},
@@ -859,9 +859,15 @@ func (s *Server) callMemory(req *Request, args json.RawMessage) Response {
 }
 
 // callAgents runs the agents tool: return the routing agent -> tier -> model
-// mapping as a JSON text content block.
+// mapping alongside a per-agent install-availability map, as a JSON text
+// content block. "agents" is the routing table; "available" reports whether
+// each agent's CLI is currently installed (all true when the availability seam
+// is unset, e.g. in tests/library use).
 func (s *Server) callAgents(req *Request) Response {
-	return textResult(req.ID, routing.AgentsModels())
+	return textResult(req.ID, map[string]any{
+		"agents":    routing.AgentsModels(),
+		"available": routing.AgentAvailability(),
+	})
 }
 
 // callCompact runs the compact tool: decode optional {max_entries, max_notes},

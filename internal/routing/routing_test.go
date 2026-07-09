@@ -1197,6 +1197,212 @@ func TestApplyOverridesMalformedIntact(t *testing.T) {
 	}
 }
 
+// setUnavailable installs an AgentAvailable seam that reports every name in
+// unavailable as not-installed (and every other agent as installed), restoring
+// the prior seam (usually nil) on cleanup so availability tests never bleed into
+// the rest of the suite.
+func setUnavailable(t *testing.T, unavailable ...string) {
+	t.Helper()
+	saved := AgentAvailable
+	t.Cleanup(func() { AgentAvailable = saved })
+	miss := make(map[string]bool, len(unavailable))
+	for _, n := range unavailable {
+		miss[n] = true
+	}
+	AgentAvailable = func(name string) bool { return !miss[name] }
+}
+
+// hardSecurityTask builds a task that scores into the "hard" tier out of the
+// embedded security signal's patterns (mirrors TestHardBoundary's construction),
+// so the availability tests track the config instead of hardcoding a string.
+func hardSecurityTask(t *testing.T) string {
+	t.Helper()
+	hard := loadedPolicy.Thresholds["hard"]
+	sec := loadedPolicy.Signals["security"]
+	needed := 0
+	for float64(needed)*sec.Weight < hard {
+		needed++
+	}
+	if needed > len(sec.Patterns) {
+		t.Fatalf("not enough security patterns (%d) to reach hard threshold %v", len(sec.Patterns), hard)
+	}
+	task := strings.Join(sec.Patterns[:needed], " ")
+	if ScoreTask(task).Tier != "hard" {
+		t.Fatalf("precondition: constructed task is not hard: %q", task)
+	}
+	return task
+}
+
+// TestSelectSkipsUnavailableAgentInProfile: a hard security task normally routes
+// to codex (highest security coverage); with codex marked not-installed the
+// profile path must skip it and choose an installed agent instead, never codex,
+// with no error.
+func TestSelectSkipsUnavailableAgentInProfile(t *testing.T) {
+	task := hardSecurityTask(t)
+
+	// Baseline (seam unset): confirm the task really would pick codex, so the
+	// fallback below is exercising a real preference, not a no-op.
+	base, err := Select(task, "", "")
+	if err != nil {
+		t.Fatalf("baseline Select error: %v", err)
+	}
+	if base.Agent != "codex" {
+		t.Fatalf("precondition: baseline agent = %q, want codex", base.Agent)
+	}
+
+	setUnavailable(t, "codex")
+	sel, err := Select(task, "", "")
+	if err != nil {
+		t.Fatalf("Select error with codex unavailable: %v", err)
+	}
+	if sel.Agent == "codex" {
+		t.Fatalf("agent = codex, want an installed agent (codex is unavailable)")
+	}
+	if sel.Model != loadedModels.Agents[sel.Agent]["hard"] {
+		t.Fatalf("model = %q, want %q", sel.Model, loadedModels.Agents[sel.Agent]["hard"])
+	}
+	// The unavailable agent must not appear among the scored candidates.
+	for _, c := range sel.Rationale.ProfileMatch.Candidates {
+		if c.Agent == "codex" {
+			t.Fatalf("codex leaked into candidate set: %+v", sel.Rationale.ProfileMatch.Candidates)
+		}
+	}
+}
+
+// TestSelectDefaultAgentFallsBackWhenUnavailable exercises the no-profiles
+// default_agent_by_difficulty path: with profiles cleared, the hard default is
+// codex; marking codex unavailable must degrade to an installed candidate via
+// coverage selection and record the fallback reason, rather than erroring.
+func TestSelectDefaultAgentFallsBackWhenUnavailable(t *testing.T) {
+	savedProfiles := loadedModels.Profiles
+	loadedModels.Profiles = nil
+	t.Cleanup(func() { loadedModels.Profiles = savedProfiles })
+
+	task := hardSecurityTask(t)
+	if def := loadedModels.DefaultAgentByDifficulty["hard"]; def != "codex" {
+		t.Fatalf("precondition: hard default = %q, want codex", def)
+	}
+
+	setUnavailable(t, "codex")
+	sel, err := Select(task, "", "")
+	if err != nil {
+		t.Fatalf("Select error: %v", err)
+	}
+	if sel.Agent == "codex" || !agentUsable(sel.Agent) {
+		t.Fatalf("agent = %q, want an installed non-codex agent", sel.Agent)
+	}
+	if !strings.Contains(sel.Rationale.ProfileMatch.Reason, "not installed") {
+		t.Fatalf("reason = %q, want it to note the default was not installed", sel.Rationale.ProfileMatch.Reason)
+	}
+}
+
+// TestSelectDefaultNoInstalledAgentErrors: no profiles, and every candidate for
+// the difficulty is unavailable, so the graceful fallback finds nothing and the
+// documented "no installed agent" error surfaces.
+func TestSelectDefaultNoInstalledAgentErrors(t *testing.T) {
+	savedProfiles := loadedModels.Profiles
+	loadedModels.Profiles = nil
+	t.Cleanup(func() { loadedModels.Profiles = savedProfiles })
+
+	task := hardSecurityTask(t)
+	setUnavailable(t, "claude", "codex", "agy")
+	_, err := Select(task, "", "")
+	if err == nil {
+		t.Fatal("Select returned nil error, want no-installed-agent error")
+	}
+	if want := `routing: no installed agent for difficulty "hard"`; err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestSelectReviewersExcludesUnavailable: with author claude and codex
+// unavailable on a standard task, the only cross-model reviewer left is agy.
+func TestSelectReviewersExcludesUnavailable(t *testing.T) {
+	task := "implement a new api endpoint with validation"
+	if ScoreTask(task).Tier != "standard" {
+		t.Fatalf("precondition: %q is not standard", task)
+	}
+	setUnavailable(t, "codex")
+	sels, err := SelectReviewers(task, "", "claude")
+	if err != nil {
+		t.Fatalf("SelectReviewers error: %v", err)
+	}
+	if len(sels) != 1 || sels[0].Agent != "agy" {
+		t.Fatalf("reviewers = %+v, want exactly [agy] (codex unavailable, claude author)", sels)
+	}
+}
+
+// TestSelectModelExplicitAgentUnavailableErrors: an explicit agent override
+// naming an uninstalled agent has no fallback and must error clearly.
+func TestSelectModelExplicitAgentUnavailableErrors(t *testing.T) {
+	setUnavailable(t, "codex")
+	_, err := Select("add a comment to the readme", "codex", "")
+	if err == nil {
+		t.Fatal("Select returned nil error, want agent-not-installed error")
+	}
+	if want := `routing: agent "codex" is not installed`; err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestSelectModelPinUnavailableAgentErrors: a model pin whose resolved agent is
+// not installed must error, naming both the agent and the model.
+func TestSelectModelPinUnavailableAgentErrors(t *testing.T) {
+	setUnavailable(t, "codex")
+	_, err := SelectModel("add a comment to the readme", "", "", "gpt-5.5") // gpt-5.5 -> codex
+	if err == nil {
+		t.Fatal("SelectModel returned nil error, want agent-not-installed error")
+	}
+	if want := `routing: agent "codex" (for model "gpt-5.5") is not installed`; err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestAgentAvailabilityReflectsSeam: the exported map reports the seam's verdict
+// per agent, and the nil-seam default reports every agent available (backward
+// compat).
+func TestAgentAvailabilityReflectsSeam(t *testing.T) {
+	// nil seam (default): all agents available.
+	saved := AgentAvailable
+	AgentAvailable = nil
+	got := AgentAvailability()
+	AgentAvailable = saved
+	for agent, ok := range got {
+		if !ok {
+			t.Fatalf("nil-seam AgentAvailability[%q] = false, want true (backward compat)", agent)
+		}
+	}
+	if _, ok := got["codex"]; !ok {
+		t.Fatal("AgentAvailability missing codex entry")
+	}
+
+	setUnavailable(t, "codex")
+	got = AgentAvailability()
+	if got["codex"] {
+		t.Fatalf("AgentAvailability[codex] = true, want false")
+	}
+	if !got["claude"] || !got["agy"] {
+		t.Fatalf("AgentAvailability = %+v, want claude/agy available", got)
+	}
+}
+
+// TestSelectNilSeamPreservesBaseline: with the seam unset, selection is
+// byte-identical to a snapshot taken before any availability wiring — the
+// backward-compat regression guard for the whole feature.
+func TestSelectNilSeamPreservesBaseline(t *testing.T) {
+	if AgentAvailable != nil {
+		t.Fatal("precondition: AgentAvailable must be nil by default")
+	}
+	task := hardSecurityTask(t)
+	sel, err := Select(task, "", "")
+	if err != nil {
+		t.Fatalf("Select error: %v", err)
+	}
+	if sel.Agent != "codex" {
+		t.Fatalf("nil-seam agent = %q, want codex (unchanged default behavior)", sel.Agent)
+	}
+}
+
 // TestEffortForDifficulty verifies the per-tier effort accessor returns the
 // configured effort for each known tier and "" for an unknown tier (the
 // backward-compat "no effort flag" signal).

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 
+	"jindo/internal/agent"
 	"jindo/internal/assess"
 	"jindo/internal/mcp"
 	"jindo/internal/memory"
@@ -42,6 +43,12 @@ func run() error {
 	// (policy llm_assess.enabled + JINDO_LLM_ASSESS env) inside routing.Select,
 	// so wiring it here changes no default behavior.
 	routing.Assessor = assess.New()
+
+	// Wire routing's availability seam to the real PATH probe so startup routing
+	// only picks agents whose CLI is actually installed (missing agents fall back
+	// or surface a clear error). Left unset in tests/library use, where every
+	// agent is treated as available (see routing.agentUsable).
+	routing.AgentAvailable = agent.Available
 
 	mem := memory.New(".jindo")
 	tmuxMgr := tmux.New("jindo", nil)

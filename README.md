@@ -1,12 +1,47 @@
-# jindo — Tmux-persistent multi-agent orchestrator
+# JINDO — Joint Intelligence Network for Distributed Orchestration
 
-jindo coordinates three real coding-agent CLIs (claude, codex, agy) in a persistent tmux session, routing tasks by difficulty and sharing context via file-locked JSON memory.
+**JINDO** is a **J**oint **I**ntelligence **N**etwork for **D**istributed **O**rchestration:
+it makes several coding-agent LLMs (Anthropic **Claude**, OpenAI **Codex**, Google
+**Gemini**/`agy`) work as one. A host agent hands JINDO a task; JINDO routes it to
+the right model(s), runs them headless, has other models review the result, and
+returns it — sharing context across agents through a file-locked JSON store.
+
+The name maps to the design:
+- **Joint Intelligence** — multiple models collaborate on one task: a single author,
+  cross-model peer review, or a multi-model fan-out that is synthesized into one answer.
+- **Network** — the pool of interchangeable agent CLIs (claude/codex/agy), detected at
+  startup and routed to by capability, difficulty, and reasoning effort.
+- **Distributed Orchestration** — a lean, stateless-per-task orchestrator that moves
+  work and records outcomes; each sub-agent runs isolated, in its own process, from only
+  the host-provided task plus bounded shared memory.
 
 ## Overview
 
-jindo distributes coding tasks across multiple agents with smart model routing. Each agent (Anthropic Claude, OpenAI Codex, Google Gemini) runs in its own persistent tmux window. Task context flows between agents via a shared, file-locked memory store. Model selection is automatic and deterministic: a heuristic classifier reads the task description, assigns a difficulty tier (trivial / standard / hard), and the config file selects the best agent and model for that tier.
+JINDO distributes coding (and, via propose/answer mode, non-coding) tasks across
+multiple agents with capability- and difficulty-aware routing. The host decides
+*what* and *which model*; JINDO executes, reviews, and verifies. Its primary
+surface is a single-binary **Go MCP server** (`cmd/jindo-mcp`) that any MCP host
+(Claude Code, Codex, `agy`) can register — see [INSTALL.md](INSTALL.md).
 
-The design is inspired by Sakana AI's jindo orchestration pattern.
+Key capabilities:
+- **Difficulty routing + host override** — a deterministic scorer (with an optional
+  LLM-assess fallback) picks a tier→agent→model, or the host pins `model`/`agent`/`effort`.
+- **Reasoning-effort routing** — per-tier effort (low/medium/high…) applied per CLI.
+- **Multi-model collaboration** — `dispatch(review=true)` fans out cross-model peer
+  review (with a security checklist) and one bounded revision; `dispatch_multi` fans a
+  task to several models and optionally has a judge synthesize the candidates.
+- **Stateful step loop** — `plan` → `plan_next` → `dispatch` → `plan_record` →
+  `plan_revise`: drive multi-step work one adaptive step at a time.
+- **Objective verify gate** — run allowlisted test/build/lint (+security scanners) and
+  gate on the result, with bounded auto-revision on failure.
+- **Self-improvement** — `calibrate` aggregates the dispatch audit log and can apply
+  conservative routing tuning to a runtime overrides file.
+- **Availability-aware** — agent CLIs are detected at startup; routing only uses the
+  ones installed (with fallback), and the `agents` tool reports availability.
+- **Async** — `dispatch_async` + `job_status` for long tasks beyond the MCP tool timeout.
+
+> A legacy Python implementation (the sections below, `pip install`) is retained and
+> untouched; the Go MCP server is the current, dependency-free entry point.
 
 ## Architecture
 
@@ -103,13 +138,17 @@ The test suite exercises the real Orchestrator, SharedMemory, ModelRouter, and T
 
 ## Go MCP server
 
-A single-binary, stdlib-only MCP server entry point is available at `cmd/jindo-mcp`. It ports the jindo orchestration core to Go and exposes it over JSON-RPC 2.0 on stdin/stdout — no runtime, no external dependencies.
+The single-binary, stdlib-only MCP server at `cmd/jindo-mcp` is JINDO's primary
+entry point. It speaks JSON-RPC 2.0 over stdin/stdout — no runtime, no external
+dependencies; the routing policy and agent config are embedded at compile time.
 
-- **Build:** `go build -o jindo-mcp ./cmd/jindo-mcp`
-- **Zero third-party deps:** stdlib only; the routing policy and agent config are embedded at compile time.
-- **Four tools:** `dispatch` (route + run a task), `memory` (read shared memory), `agents` (list routing table), `compact` (trigger memory compaction).
+- **Build:** `go build -o jindo-mcp ./cmd/jindo-mcp` (or `make install` — see [INSTALL.md](INSTALL.md)).
+- **13 tools:**
+  - execution — `dispatch`, `dispatch_async`, `job_status`, `dispatch_multi`
+  - planning/step loop — `plan`, `plan_next`, `plan_record`, `plan_revise`, `plan_status`
+  - memory/routing — `memory`, `agents`, `compact`, `calibrate`
 
-See [docs/jindo-mcp.md](docs/jindo-mcp.md) for full build instructions, MCP client registration, tool reference, and headless multi-agent design details.
+See [docs/jindo-mcp.md](docs/jindo-mcp.md) for the full tool reference, MCP client registration, and headless multi-agent design; [INSTALL.md](INSTALL.md) for one-command setup across Claude Code / Codex / `agy`.
 
 ## Cross-agent context sharing
 
