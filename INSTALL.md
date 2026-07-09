@@ -74,14 +74,21 @@ Then restart Claude Code or run `/mcp` to connect.
 ```bash
 codex mcp add jindo -- /abs/path/to/jindo-mcp
 ```
-`codex mcp add` does not set timeouts, so add them (and, optionally, the
-LLM-assess env) to the block in `~/.codex/config.toml`:
+`codex mcp add` does **not** set per-server timeouts, and Codex's default MCP
+tool timeout is far shorter than a `dispatch` (which runs a sub-agent for
+minutes) — so without a longer timeout the call trips it and fails. The
+one-command install (`make install` / `./install.sh`) fixes this automatically:
+after registering, it writes `startup_timeout_sec`/`tool_timeout_sec` into
+`[mcp_servers.jindo]` (defaults 30 / 1800, overridable via
+`JINDO_CODEX_STARTUP_TIMEOUT` / `JINDO_CODEX_TOOL_TIMEOUT`). To do it by hand,
+add them (and, optionally, the LLM-assess env) to the block in
+`~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.jindo]
 command = "/abs/path/to/jindo-mcp"
 startup_timeout_sec = 30.0
-tool_timeout_sec    = 1800.0
+tool_timeout_sec    = 1800.0   # dispatch runs sub-agents for minutes
 
 [mcp_servers.jindo.env]
 JINDO_LLM_ASSESS = "1"   # optional: enable the LLM difficulty-assessment fallback

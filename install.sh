@@ -47,6 +47,43 @@ inject_guidance() {
   echo "    injected: $target"
 }
 
+# Codex request-timeout fix. `codex mcp add` does NOT set per-server timeouts, so
+# Codex's default MCP tool timeout is short — but a jindo `dispatch` spawns a
+# sub-agent that can run for minutes, tripping the timeout and failing the call.
+# ensure_codex_timeouts adds startup_timeout_sec/tool_timeout_sec to the
+# [mcp_servers.jindo] table if missing (idempotent; leaves any other keys, incl.
+# an env sub-table, untouched). Values are overridable via env.
+JINDO_CODEX_STARTUP_TIMEOUT="${JINDO_CODEX_STARTUP_TIMEOUT:-30}"
+JINDO_CODEX_TOOL_TIMEOUT="${JINDO_CODEX_TOOL_TIMEOUT:-1800}"
+ensure_codex_timeouts() {
+  local cfg="$HOME/.codex/config.toml"
+  [ -f "$cfg" ] || { echo "    (no ~/.codex/config.toml yet; skipping timeout setup)"; return 0; }
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "    [dry-run] would ensure startup_timeout_sec=${JINDO_CODEX_STARTUP_TIMEOUT}/tool_timeout_sec=${JINDO_CODEX_TOOL_TIMEOUT} in [mcp_servers.jindo]"
+    return
+  fi
+  cp "$cfg" "$cfg.bak-jindo-$(date +%Y%m%d-%H%M%S)"
+  awk -v st="$JINDO_CODEX_STARTUP_TIMEOUT" -v tt="$JINDO_CODEX_TOOL_TIMEOUT" '
+    function flush() {
+      if (injindo) {
+        if (!have_start) print "startup_timeout_sec = " st ".0"
+        if (!have_tool)  print "tool_timeout_sec = " tt ".0"
+      }
+      injindo=0; have_start=0; have_tool=0
+    }
+    /^\[/ {
+      flush()
+      if ($0=="[mcp_servers.jindo]") injindo=1
+      print; next
+    }
+    injindo && /^[[:space:]]*startup_timeout_sec[[:space:]]*=/ {have_start=1}
+    injindo && /^[[:space:]]*tool_timeout_sec[[:space:]]*=/  {have_tool=1}
+    {print}
+    END{ flush() }
+  ' "$cfg" > "$cfg.jindo-tmp" && mv "$cfg.jindo-tmp" "$cfg"
+  echo "    ensured [mcp_servers.jindo] startup_timeout_sec=${JINDO_CODEX_STARTUP_TIMEOUT}s, tool_timeout_sec=${JINDO_CODEX_TOOL_TIMEOUT}s"
+}
+
 echo "==> Building jindo-mcp"
 ( cd "$ROOT" && go build -o "$BIN" ./cmd/jindo-mcp )
 echo "    built: $BIN"
@@ -75,10 +112,11 @@ if command -v codex >/dev/null 2>&1; then
   echo "  - Codex CLI"
   run "codex mcp remove jindo >/dev/null 2>&1 || true"
   run "codex mcp add jindo -- \"$BIN\""
-  echo "    NOTE: 'codex mcp add' does not set timeouts or open the sandbox."
-  echo "          Add startup_timeout_sec/tool_timeout_sec to [mcp_servers.jindo] in"
-  echo "          ~/.codex/config.toml, and run codex with a danger-full-access sandbox"
-  echo "          (dispatch spawns sub-agents). See INSTALL.md."
+  # Fix the request timeout: dispatch runs sub-agents for minutes, longer than
+  # Codex's default MCP tool timeout, so set generous per-server timeouts.
+  ensure_codex_timeouts
+  echo "    NOTE: run codex with a danger-full-access sandbox (or a profile whose"
+  echo "          sandbox_mode=\"danger-full-access\"); dispatch spawns sub-agents. See INSTALL.md."
   registered=1
 fi
 if command -v agy >/dev/null 2>&1; then
