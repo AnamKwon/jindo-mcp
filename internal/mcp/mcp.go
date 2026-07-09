@@ -397,7 +397,7 @@ func tools() []toolDef {
 		},
 		{
 			Name:        "memory",
-			Description: "Read jindo shared memory: one key, or all entries when key is omitted",
+			Description: "Read jindo shared memory: one key's value, or {entries, insights} when key is omitted (insights = the cross-agent learning layer)",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -855,7 +855,14 @@ func (s *Server) callMemory(req *Request, args json.RawMessage) Response {
 	if err != nil {
 		return errorResponse(req.ID, codeInternalError, "memory read failed: "+err.Error())
 	}
-	return textResult(req.ID, all)
+	// Surface both memory tiers: the flat task-entry store (entries) and the
+	// curated cross-agent insight layer (insights). Insights are best-effort —
+	// a read error there must not hide the entries the caller asked for.
+	insights, _ := s.o.Mem.Insights()
+	return textResult(req.ID, map[string]any{
+		"entries":  all,
+		"insights": insights,
+	})
 }
 
 // callAgents runs the agents tool: return the routing agent -> tier -> model

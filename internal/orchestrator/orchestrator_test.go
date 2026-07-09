@@ -76,6 +76,18 @@ func (s *spyMem) MaybeCompact(opts memory.CompactOptions) (bool, error) {
 // this method).
 func (s *spyMem) Stats() (int, bool, error) { return s.inner.Stats() }
 
+// RetrieveInsights/AddInsight delegate to the real store. They form the curated
+// insight channel (the documented exception to the no-content invariant), so
+// like Stats they do NOT bump readCalls: reading a bounded top-K of the
+// purpose-built learning tier is exactly what this surface is for, distinct from
+// a Read/All content pull. (spyMem satisfies the widened dispatchMem via these.)
+func (s *spyMem) RetrieveInsights(task string, k int) ([]memory.Insight, error) {
+	return s.inner.RetrieveInsights(task, k)
+}
+func (s *spyMem) AddInsight(text, agent, model string, tags []string) (bool, error) {
+	return s.inner.AddInsight(text, agent, model, tags)
+}
+
 // Read/All are present only so a bug that pulled content would register. They
 // are never expected to be called during Dispatch.
 func (s *spyMem) Read(key string) (any, bool)  { s.readCalls++; return s.inner.Read(key) }
@@ -2474,5 +2486,56 @@ func TestDispatchMultiCandidateErrorIsBestEffort(t *testing.T) {
 	// The failed candidate still carries the model (and resolved agent) it was asked for.
 	if res.Candidates[1].Model != "gpt-5.5" || res.Candidates[1].Agent != "codex" {
 		t.Fatalf("candidate[1] model/agent = %q/%q, want gpt-5.5/codex", res.Candidates[1].Model, res.Candidates[1].Agent)
+	}
+}
+
+// TestDispatchInsightRoundTrip verifies the cross-agent insight loop end to end:
+// a first dispatch contributes its summary to the insight layer, and a later
+// dispatch whose task shares terminology gets that learning injected into the
+// sub-agent's system prompt (curated recall), while an unrelated task does not.
+func TestDispatchInsightRoundTrip(t *testing.T) {
+	mem := memory.New(t.TempDir())
+	mgr, _ := newFakeManager(1)
+
+	var argv []string
+	o := New(mem, mgr)
+	o.GetAdapter = func(name string) (agent.Adapter, error) {
+		return newRecordingAdapter(t, name, cannedJSON, &argv), nil
+	}
+
+	// First dispatch (routed to claude) -> canned summary "refactored the
+	// scheduler" is contributed as an insight.
+	if _, err := o.Dispatch("refactor the concurrent scheduler race condition", "claude", ""); err != nil {
+		t.Fatalf("first Dispatch: %v", err)
+	}
+	ins, err := mem.Insights()
+	if err != nil {
+		t.Fatalf("Insights: %v", err)
+	}
+	if len(ins) != 1 || !strings.Contains(ins[0].Text, "scheduler") {
+		t.Fatalf("expected one 'scheduler' insight contributed, got %v", ins)
+	}
+
+	// Second dispatch on a task that shares the term "scheduler": the insight
+	// brief must be injected into the system prompt handed to the sub-agent.
+	argv = nil
+	if _, err := o.Dispatch("add unit tests for the scheduler", "claude", ""); err != nil {
+		t.Fatalf("second Dispatch: %v", err)
+	}
+	joined := strings.Join(argv, "\x00")
+	if !strings.Contains(joined, "CROSS-AGENT INSIGHTS") {
+		t.Fatalf("second dispatch prompt missing insight brief header; argv=%v", argv)
+	}
+	if !strings.Contains(joined, "refactored the scheduler") {
+		t.Fatalf("second dispatch prompt missing the contributed insight text; argv=%v", argv)
+	}
+
+	// Third dispatch on an unrelated task: no brief injected (no noise).
+	argv = nil
+	if _, err := o.Dispatch("update the copyright year in the license header", "claude", ""); err != nil {
+		t.Fatalf("third Dispatch: %v", err)
+	}
+	if strings.Contains(strings.Join(argv, "\x00"), "CROSS-AGENT INSIGHTS") {
+		t.Fatalf("unrelated dispatch wrongly injected an insight brief; argv=%v", argv)
 	}
 }

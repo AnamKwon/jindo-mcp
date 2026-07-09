@@ -99,7 +99,7 @@ func (m *SharedMemory) Write(key string, value any, author string) error {
 // Read returns the stored value for key and true, or (nil, false) if the key is
 // absent, is the reserved notes key, or the stored entry is malformed.
 func (m *SharedMemory) Read(key string) (any, bool) {
-	if key == notesKey {
+	if key == notesKey || key == insightsKey {
 		return nil, false
 	}
 	if err := m.acquire(); err != nil {
@@ -144,10 +144,11 @@ func (m *SharedMemory) All() (map[string]any, error) {
 	}
 	out := make(map[string]any)
 	for k, entry := range data {
-		if k == notesKey || k == digestKey {
-			// Control keys, not real task entries: _notes holds the notes list
-			// and _digest holds the compaction fold (see compaction.go). Both
-			// are excluded so callers iterating All() see only user entries.
+		if k == notesKey || k == digestKey || k == insightsKey {
+			// Control keys, not real task entries: _notes holds the notes list,
+			// _digest holds the compaction fold (see compaction.go), and
+			// _insights holds the cross-agent insight layer (see insights.go).
+			// All are excluded so callers iterating All() see only user entries.
 			continue
 		}
 		if m2, ok := entry.(map[string]any); ok {
@@ -303,7 +304,7 @@ func (m *SharedMemory) Stats() (records int, hasDigest bool, err error) {
 	}
 	_, hasDigest = data[digestKey]
 	for k, entry := range data {
-		if k == notesKey || k == digestKey {
+		if k == notesKey || k == digestKey || k == insightsKey {
 			continue
 		}
 		if m2, ok := entry.(map[string]any); ok {

@@ -76,6 +76,17 @@ type dispatchMem interface {
 	// injected_records/injected_digest observable while preserving the no
 	// Read/All invariant. *memory.SharedMemory satisfies this.
 	Stats() (records int, hasDigest bool, err error)
+	// RetrieveInsights and AddInsight expose the cross-agent insight layer (see
+	// insights.go). These are the ONE deliberate, bounded exception to the "no
+	// entry content in the orchestrator" invariant: the insight layer IS the
+	// curated bounded-memory channel the headless-agent contract promises, so
+	// Dispatch reads a relevance-ranked top-K of it to build the injection brief
+	// (RetrieveInsights) and contributes this dispatch's own distilled summary
+	// back to it (AddInsight). Unlike Read/All, neither exposes raw task-entry
+	// content — only the small, purpose-built learning tier. *memory.SharedMemory
+	// satisfies both.
+	RetrieveInsights(task string, k int) ([]memory.Insight, error)
+	AddInsight(text, agent, model string, tags []string) (bool, error)
 }
 
 // Orchestrator distributes tasks to agents, sharing context via shared memory.
@@ -705,6 +716,15 @@ func (o *Orchestrator) runAuthor(task, agentName, priority, model, guidance, eff
 	if guidance != "" {
 		sysPrompt += "\n\nTASK-SPECIFIC GUIDANCE (from the caller; follow it for THIS task):\n" + guidance + "\n"
 	}
+	// Curated cross-agent insight injection: instead of relying only on the
+	// agent scanning the whole store, retrieve the few learnings most relevant
+	// to THIS task (from any prior agent/model) and inject them as a short
+	// brief. Read-only and bounded (top-K); a store with no relevant insight
+	// injects nothing, keeping the prompt byte-identical to the pre-insight
+	// behavior. Best-effort: a retrieval error never blocks the dispatch.
+	if insights, ierr := mem.RetrieveInsights(task, insightInjectK); ierr == nil && len(insights) > 0 {
+		sysPrompt += renderInsightBrief(insights)
+	}
 
 	// The actual process working directory — needed so agy (which, unlike
 	// claude/codex, does not default to operating on the real cwd — see
@@ -858,6 +878,19 @@ func (o *Orchestrator) runAuthor(task, agentName, priority, model, guidance, eff
 		return authorOutcome{}, err
 	}
 
+	// Contribute this dispatch's own summary to the cross-agent insight layer,
+	// tagged with its provenance (agent/model) and task keywords, so a later
+	// agent of ANY model can benefit from what was learned here. Only successful
+	// runs with a non-empty summary contribute; AddInsight dedups by normalized
+	// text, so a learning re-derived across dispatches is reinforced (hits++,
+	// salience↑) rather than duplicated. Best-effort — a contribution failure
+	// records a note and never fails the dispatch.
+	if resp.Status == "ok" && strings.TrimSpace(resp.Summary) != "" {
+		if _, err := mem.AddInsight(resp.Summary, route.Agent, route.Model, taskTags(task)); err != nil {
+			_ = mem.AppendNote("orchestrator", fmt.Sprintf("insight add failed for %s: %v", key, err))
+		}
+	}
+
 	// Self-bound the shared store now that this dispatch's own authoritative
 	// record is durably written. Running here (per loop-0011-design §1) is the
 	// only point that sees the FINAL state of this dispatch — after the fan-out
@@ -876,11 +909,12 @@ func (o *Orchestrator) runAuthor(task, agentName, priority, model, guidance, eff
 	// Dispatch failure. We keep visibility (not silent swallowing) by recording
 	// the failure as a best-effort note, then proceed to return success.
 	if _, err := mem.MaybeCompact(memory.CompactOptions{
-		MaxEntries: 200,
-		MaxNotes:   200,
-		TTLSeconds: 0,
-		Now:        0,
-		Summarize:  nil,
+		MaxEntries:  200,
+		MaxNotes:    200,
+		MaxInsights: 200,
+		TTLSeconds:  0,
+		Now:         0,
+		Summarize:   nil,
 	}); err != nil {
 		// Note append is itself best-effort; its error is intentionally ignored
 		// so housekeeping never blocks the primary path.
@@ -1476,6 +1510,44 @@ func rationaleSummary(r routing.Rationale) string {
 		matched = strings.Join(names, ",")
 	}
 	return fmt.Sprintf("total=%.2f matched=%s", r.Total, matched)
+}
+
+// insightInjectK bounds how many cross-agent insights are injected into a
+// dispatch prompt. Kept small so the brief stays a curated hint, not a dump:
+// the point of the insight layer is relevance-ranked recall, not re-serializing
+// the store into every prompt.
+const insightInjectK = 5
+
+// taskTags derives a few retrieval keywords from a task string so a contributed
+// insight is findable by future tasks that share terminology even when the
+// summary text words it differently. Bounded to keep tags a hint, not the whole
+// task. Reuses the memory tokenizer so tags and retrieval scoring share a basis.
+func taskTags(task string) []string {
+	return memory.KeywordsOf(task, 6)
+}
+
+// renderInsightBrief formats retrieved insights as a compact, deterministic
+// prompt section: one line per insight with its provenance and reinforcement so
+// the reading agent can weigh it (a learning three different models re-derived
+// is stronger than a one-off). Returns "" for an empty slice so callers append
+// nothing when there is nothing relevant.
+func renderInsightBrief(insights []memory.Insight) string {
+	if len(insights) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\nCROSS-AGENT INSIGHTS (learnings from prior agents on this project, most relevant first — treat as hints, verify before relying):\n")
+	for _, in := range insights {
+		src := in.Agent
+		if in.Model != "" {
+			src += "/" + in.Model
+		}
+		if src == "" {
+			src = "unknown"
+		}
+		fmt.Fprintf(&b, "- %s  [src: %s, reinforced %dx]\n", truncateForLog(in.Text), src, in.Hits)
+	}
+	return b.String()
 }
 
 // dispatchLogFile is the JSONL sink appended per dispatch, living next to

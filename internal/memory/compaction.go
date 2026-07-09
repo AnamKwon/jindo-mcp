@@ -42,6 +42,12 @@ type CompactOptions struct {
 	MaxEntries int
 	// MaxNotes keeps only the last-N notes. 0 disables note trimming.
 	MaxNotes int
+	// MaxInsights caps the cross-agent insight layer (see insights.go). When the
+	// layer exceeds it, the lowest-value insights (by salience, then hits, then
+	// recency) are evicted, keeping the most reinforced/recent learnings live. 0
+	// disables the cap. The insight layer is always carried forward verbatim by
+	// Compact regardless of this cap; only a positive MaxInsights prunes it.
+	MaxInsights int
 	// TTLSeconds drops COMPLETED entries whose ts < Now-TTLSeconds. 0 disables
 	// TTL dropping. Requires Now>0 to take effect (see Now).
 	TTLSeconds int64
@@ -125,6 +131,9 @@ func (m *SharedMemory) Compact(opts CompactOptions) (CompactResult, error) {
 	}
 	// Pre-existing digest wrapper (may be nil).
 	priorDigest, _ := data[digestKey].(map[string]any)
+	// Cross-agent insight layer: always carried forward (its stored form is a
+	// bare list, not a task entry), optionally capped below.
+	insights := loadInsights(data)
 
 	// supersede-by-key (rule 1): group by key, keep newest ts. Keys are already
 	// unique so this is effectively identity, but the guard is correct if a
@@ -132,7 +141,7 @@ func (m *SharedMemory) Compact(opts CompactOptions) (CompactResult, error) {
 	byKey := make(map[string]realEntry)
 	reserved := make(map[string]map[string]any)
 	for k, entry := range data {
-		if k == notesKey || k == digestKey {
+		if k == notesKey || k == digestKey || k == insightsKey {
 			continue
 		}
 		wrapper, ok := entry.(map[string]any)
@@ -241,6 +250,26 @@ func (m *SharedMemory) Compact(opts CompactOptions) (CompactResult, error) {
 	}
 	result.NotesAfter = len(notes)
 
+	// --- rule 5: cap the insight layer, evicting lowest-value learnings ---
+	// The layer is carried forward verbatim unless MaxInsights>0 and exceeded,
+	// in which case keep the highest (salience, hits, recency) and drop the rest.
+	if opts.MaxInsights > 0 && len(insights) > opts.MaxInsights {
+		sort.SliceStable(insights, func(i, j int) bool {
+			if insights[i].Salience != insights[j].Salience {
+				return insights[i].Salience > insights[j].Salience
+			}
+			if insights[i].Hits != insights[j].Hits {
+				return insights[i].Hits > insights[j].Hits
+			}
+			if insights[i].UpdatedTS != insights[j].UpdatedTS {
+				return insights[i].UpdatedTS > insights[j].UpdatedTS
+			}
+			return insights[i].ID < insights[j].ID
+		})
+		insights = insights[:opts.MaxInsights]
+	}
+	storeInsights(out, insights)
+
 	if err := m.save(out); err != nil {
 		return CompactResult{}, err
 	}
@@ -264,11 +293,16 @@ func (m *SharedMemory) MaybeCompact(opts CompactOptions) (bool, error) {
 
 	realCount := 0
 	notesCount := 0
+	insightCount := 0
 	for k, entry := range data {
 		switch k {
 		case notesKey:
 			if n, ok := entry.([]any); ok {
 				notesCount = len(n)
+			}
+		case insightsKey:
+			if n, ok := entry.([]any); ok {
+				insightCount = len(n)
 			}
 		case digestKey:
 			// not a real entry
@@ -286,7 +320,8 @@ func (m *SharedMemory) MaybeCompact(opts CompactOptions) (bool, error) {
 	m.release()
 
 	over := (opts.MaxEntries > 0 && realCount > opts.MaxEntries) ||
-		(opts.MaxNotes > 0 && notesCount > opts.MaxNotes)
+		(opts.MaxNotes > 0 && notesCount > opts.MaxNotes) ||
+		(opts.MaxInsights > 0 && insightCount > opts.MaxInsights)
 	if !over {
 		return false, nil
 	}

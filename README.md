@@ -1,10 +1,13 @@
 # JINDO — Joint Intelligence Network for Distributed Orchestration
 
+![Cute Jindo dog mascot orchestrating multiple coding-agent windows](assets/jindo-hero.png)
+
 **JINDO** is a **J**oint **I**ntelligence **N**etwork for **D**istributed **O**rchestration:
 it makes several coding-agent LLMs (Anthropic **Claude**, OpenAI **Codex**, Google
 **Gemini**/`agy`) work as one. A host agent hands JINDO a task; JINDO routes it to
-the right model(s), runs them headless, has other models review the result, and
-returns it — sharing context across agents through a file-locked JSON store.
+the right model(s), runs them headless, can have other models review the result
+when requested, and returns it — sharing context across agents through a
+file-locked JSON store.
 
 The name maps to the design:
 - **Joint Intelligence** — multiple models collaborate on one task: a single author,
@@ -19,9 +22,19 @@ The name maps to the design:
 
 JINDO distributes coding (and, via propose/answer mode, non-coding) tasks across
 multiple agents with capability- and difficulty-aware routing. The host decides
-*what* and *which model*; JINDO executes, reviews, and verifies. Its primary
+*what* and *which model*; JINDO executes it, with optional peer review and
+verification gates. Its primary
 surface is a single-binary **Go MCP server** (`cmd/jindo-mcp`) that any MCP host
 (Claude Code, Codex, `agy`) can register — see [INSTALL.md](INSTALL.md).
+
+![JINDO architecture: the MCP host drives a plan / plan_next / dispatch / plan_record loop against JINDO's MCP tool layer, which dispatches through a router to agent CLIs; results return/store directly by default, with review/verify as a dashed side branch entered only when the host passes review=true or verify commands, before shared file-locked state](assets/jindo-architecture.svg)
+
+The host remains the driver of that loop: `plan` returns structured steps and
+establishes active plan state, then the host iterates
+`plan_next` -> dispatch the returned step (optionally using the suggested model,
+and optionally passing `review=true`/`verify` commands to gate it)
+-> `plan_record` the outcome, optionally calling `plan_revise` to adapt the
+remaining steps. JINDO never runs the loop unattended.
 
 Key capabilities:
 - **Difficulty routing + host override** — a deterministic scorer (with an optional
@@ -30,10 +43,13 @@ Key capabilities:
 - **Multi-model collaboration** — `dispatch(review=true)` fans out cross-model peer
   review (with a security checklist) and one bounded revision; `dispatch_multi` fans a
   task to several models and optionally has a judge synthesize the candidates.
-- **Stateful step loop** — `plan` → `plan_next` → `dispatch` → `plan_record` →
-  `plan_revise`: drive multi-step work one adaptive step at a time.
-- **Objective verify gate** — run allowlisted test/build/lint (+security scanners) and
-  gate on the result, with bounded auto-revision on failure.
+- **Host-driven step loop** — `plan` decomposes a goal into steps and persists
+  active plan state, but does not execute them; the host drives the loop
+  itself via `plan_next` -> `dispatch` -> `plan_record` -> optional `plan_revise`,
+  one adaptive step at a time.
+- **Objective verify gate** — when verify commands are supplied, run allowlisted
+  test/build/lint (+security scanners) commands and gate on the result, with bounded
+  auto-revision on failure.
 - **Self-improvement** — `calibrate` aggregates the dispatch audit log and can apply
   conservative routing tuning to a runtime overrides file.
 - **Availability-aware** — agent CLIs are detected at startup; routing only uses the
