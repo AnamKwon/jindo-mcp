@@ -823,11 +823,13 @@ func (o *Orchestrator) runAuthor(task, agentName, priority, model, guidance, eff
 	resp := agentproto.ParseResponse(stdout)
 
 	// Fan out the agent's memory updates FIRST, before the authoritative record
-	// below. Notes are free-form breadcrumbs. Keyed values are persisted under an
-	// AGENT-OWNED, collision-free key: we NEVER write under the orchestrator's key
-	// or another agent's key. If an update names a key already owned by a
-	// DIFFERENT agent (per OwnerOf), we refuse to clobber it and allocate a fresh
-	// owned key instead.
+	// below. A note is the agent's durable fact for later agents (per the response
+	// contract), so it is BOTH appended to the free-form audit trail AND
+	// contributed to the cross-agent insight layer. Keyed values are persisted
+	// under an AGENT-OWNED, collision-free key: we NEVER write under the
+	// orchestrator's key or another agent's key. If an update names a key already
+	// owned by a DIFFERENT agent (per OwnerOf), we refuse to clobber it and
+	// allocate a fresh owned key instead.
 	//
 	// This loop runs BEFORE the authoritative full-result Upsert so that the
 	// structured record always wins as the final state of the dispatch's own key.
@@ -839,6 +841,15 @@ func (o *Orchestrator) runAuthor(task, agentName, priority, model, guidance, eff
 		if up.Note != "" {
 			if err := mem.AppendNote(route.Agent, up.Note); err != nil {
 				return authorOutcome{}, err
+			}
+			// Contribute the note to the insight layer, provenance-tagged
+			// (agent/model) and keyed by the task's terms, so a later agent of
+			// ANY model can recall it by relevance. AddInsight dedups by
+			// normalized text (re-derivation reinforces, not duplicates).
+			// Best-effort: the note is already durable in the audit trail, so an
+			// insight failure records a note and never fails the dispatch.
+			if _, ierr := mem.AddInsight(up.Note, route.Agent, route.Model, taskTags(task)); ierr != nil {
+				_ = mem.AppendNote("orchestrator", fmt.Sprintf("insight add failed for %s: %v", key, ierr))
 			}
 		}
 		if up.Key != "" || up.Value != nil {
@@ -878,18 +889,10 @@ func (o *Orchestrator) runAuthor(task, agentName, priority, model, guidance, eff
 		return authorOutcome{}, err
 	}
 
-	// Contribute this dispatch's own summary to the cross-agent insight layer,
-	// tagged with its provenance (agent/model) and task keywords, so a later
-	// agent of ANY model can benefit from what was learned here. Only successful
-	// runs with a non-empty summary contribute; AddInsight dedups by normalized
-	// text, so a learning re-derived across dispatches is reinforced (hits++,
-	// salience↑) rather than duplicated. Best-effort — a contribution failure
-	// records a note and never fails the dispatch.
-	if resp.Status == "ok" && strings.TrimSpace(resp.Summary) != "" {
-		if _, err := mem.AddInsight(resp.Summary, route.Agent, route.Model, taskTags(task)); err != nil {
-			_ = mem.AppendNote("orchestrator", fmt.Sprintf("insight add failed for %s: %v", key, err))
-		}
-	}
+	// The cross-agent insight layer is fed from the agent's memory_updates NOTES
+	// (its durable facts for later agents; see the fan-out loop above), NOT from
+	// the dispatch summary — a summary describes what THIS run did, which is a
+	// low-signal, one-off action log rather than a reusable project fact.
 
 	// Self-bound the shared store now that this dispatch's own authoritative
 	// record is durably written. Running here (per loop-0011-design §1) is the

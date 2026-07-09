@@ -2490,21 +2490,29 @@ func TestDispatchMultiCandidateErrorIsBestEffort(t *testing.T) {
 }
 
 // TestDispatchInsightRoundTrip verifies the cross-agent insight loop end to end:
-// a first dispatch contributes its summary to the insight layer, and a later
-// dispatch whose task shares terminology gets that learning injected into the
-// sub-agent's system prompt (curated recall), while an unrelated task does not.
+// a first dispatch contributes its memory_updates NOTE (the durable-fact channel)
+// to the insight layer, and a later dispatch whose task shares terminology gets
+// that learning injected into the sub-agent's system prompt (curated recall),
+// while an unrelated task does not. The dispatch SUMMARY is deliberately NOT
+// contributed — only notes are.
 func TestDispatchInsightRoundTrip(t *testing.T) {
+	// A realistic response: a low-signal action summary plus a durable-fact note.
+	// Only the note should become an insight.
+	const noteCanned = `Done.
+
+{"status":"ok","result":"did X","summary":"made some changes","memory_updates":[{"note":"the scheduler is guarded by a single global mutex"}]}`
+
 	mem := memory.New(t.TempDir())
 	mgr, _ := newFakeManager(1)
 
 	var argv []string
 	o := New(mem, mgr)
 	o.GetAdapter = func(name string) (agent.Adapter, error) {
-		return newRecordingAdapter(t, name, cannedJSON, &argv), nil
+		return newRecordingAdapter(t, name, noteCanned, &argv), nil
 	}
 
-	// First dispatch (routed to claude) -> canned summary "refactored the
-	// scheduler" is contributed as an insight.
+	// First dispatch (routed to claude) -> the NOTE is contributed as an insight;
+	// the summary ("made some changes") is not.
 	if _, err := o.Dispatch("refactor the concurrent scheduler race condition", "claude", ""); err != nil {
 		t.Fatalf("first Dispatch: %v", err)
 	}
@@ -2513,7 +2521,10 @@ func TestDispatchInsightRoundTrip(t *testing.T) {
 		t.Fatalf("Insights: %v", err)
 	}
 	if len(ins) != 1 || !strings.Contains(ins[0].Text, "scheduler") {
-		t.Fatalf("expected one 'scheduler' insight contributed, got %v", ins)
+		t.Fatalf("expected one note-derived 'scheduler' insight, got %v", ins)
+	}
+	if strings.Contains(ins[0].Text, "made some changes") {
+		t.Fatalf("summary was contributed as an insight; only notes should be: %v", ins)
 	}
 
 	// Second dispatch on a task that shares the term "scheduler": the insight
@@ -2526,8 +2537,8 @@ func TestDispatchInsightRoundTrip(t *testing.T) {
 	if !strings.Contains(joined, "CROSS-AGENT INSIGHTS") {
 		t.Fatalf("second dispatch prompt missing insight brief header; argv=%v", argv)
 	}
-	if !strings.Contains(joined, "refactored the scheduler") {
-		t.Fatalf("second dispatch prompt missing the contributed insight text; argv=%v", argv)
+	if !strings.Contains(joined, "single global mutex") {
+		t.Fatalf("second dispatch prompt missing the contributed note-insight; argv=%v", argv)
 	}
 
 	// Third dispatch on an unrelated task: no brief injected (no noise).
