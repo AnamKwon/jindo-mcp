@@ -52,10 +52,23 @@ type cliAdapter struct {
 	// inject flags without threading them through every call site. It is
 	// merged ahead of the per-call extra passed to BuildCommandWith.
 	ExtraArgs []string
-	Exec      func(argv []string) (string, error)
+	// Dir is the process working directory the real subprocess runs in. When
+	// "" (the default) the subprocess inherits jindo's cwd, exactly as before;
+	// when set (via SetDir) defaultExec binds exec.Command's Dir to it so a
+	// per-dispatch workdir anchors the sub-agent's process cwd.
+	Dir string
+	// Exec is a TEST OVERRIDE seam: when non-nil, execArgv calls it instead of
+	// defaultExec, so tests can capture the argv without spawning a process. The
+	// constructors leave it nil so production always runs the real subprocess.
+	Exec func(argv []string) (string, error)
 }
 
 func (a *cliAdapter) Name() string { return a.name }
+
+// SetDir sets the process working directory the real subprocess runs in (see
+// the Dir field). The orchestrator calls this via a structural type assertion
+// before RunWith to anchor a per-dispatch workdir.
+func (a *cliAdapter) SetDir(dir string) { a.Dir = dir }
 
 // BuildCommand builds the headless argv with no injected extras.
 func (a *cliAdapter) BuildCommand(task, model string) []string {
@@ -95,16 +108,27 @@ func (a *cliAdapter) BuildCommandWith(task, model string, extra []string) []stri
 	}
 }
 
-// Run builds the argv (with any adapter ExtraArgs) and delegates to Exec.
+// Run builds the argv (with any adapter ExtraArgs) and delegates to execArgv.
 func (a *cliAdapter) Run(task, model string) (string, error) {
 	argv := a.BuildCommand(task, model)
-	return a.Exec(argv)
+	return a.execArgv(argv)
 }
 
-// RunWith builds the argv with per-dispatch extra flags and delegates to Exec.
+// RunWith builds the argv with per-dispatch extra flags and delegates to
+// execArgv.
 func (a *cliAdapter) RunWith(task, model string, extra []string) (string, error) {
 	argv := a.BuildCommandWith(task, model, extra)
-	return a.Exec(argv)
+	return a.execArgv(argv)
+}
+
+// execArgv runs argv, honoring the test override: if a.Exec is set (tests) it
+// is used, otherwise the real subprocess runs via defaultExec (which binds the
+// process cwd to a.Dir when set).
+func (a *cliAdapter) execArgv(argv []string) (string, error) {
+	if a.Exec != nil {
+		return a.Exec(argv)
+	}
+	return a.defaultExec(argv)
 }
 
 // wrapExecErr enriches a failed subprocess error with the captured stderr, so
@@ -122,25 +146,31 @@ func wrapExecErr(out []byte, err error) (string, error) {
 	return string(out), err
 }
 
-// defaultExec runs the real subprocess via os/exec.
-func defaultExec(argv []string) (string, error) {
-	out, err := exec.Command(argv[0], argv[1:]...).Output()
+// defaultExec runs the real subprocess via os/exec, binding the process working
+// directory to a.Dir when set (empty Dir inherits jindo's cwd, matching the
+// pre-workdir behavior).
+func (a *cliAdapter) defaultExec(argv []string) (string, error) {
+	cmd := exec.Command(argv[0], argv[1:]...)
+	if a.Dir != "" {
+		cmd.Dir = a.Dir
+	}
+	out, err := cmd.Output()
 	return wrapExecErr(out, err)
 }
 
 // NewClaude returns an Adapter for the 'claude' CLI.
 func NewClaude() *cliAdapter {
-	return &cliAdapter{name: "claude", cli: "claude", kind: kindClaudeLike, Exec: defaultExec}
+	return &cliAdapter{name: "claude", cli: "claude", kind: kindClaudeLike}
 }
 
 // NewCodex returns an Adapter for the 'codex' CLI.
 func NewCodex() *cliAdapter {
-	return &cliAdapter{name: "codex", cli: "codex", kind: kindCodex, Exec: defaultExec}
+	return &cliAdapter{name: "codex", cli: "codex", kind: kindCodex}
 }
 
 // NewAgy returns an Adapter for the 'agy' CLI.
 func NewAgy() *cliAdapter {
-	return &cliAdapter{name: "agy", cli: "agy", kind: kindClaudeLike, Exec: defaultExec}
+	return &cliAdapter{name: "agy", cli: "agy", kind: kindClaudeLike}
 }
 
 // Available reports whether the named agent's CLI binary is resolvable on PATH,

@@ -11,6 +11,12 @@ ignore this section and work normally.)
   keyword scorer is only a fallback and misroutes (security keywords over-promote
   trivial work; keyword-free but genuinely hard work gets under-routed), so
   specify them.
+- **Target directory:** if the task must create or modify files in a specific
+  directory (e.g. a scratch project under `/tmp/...`), pass `workdir` on the
+  dispatch. The sub-agent is anchored there (its process cwd + write access) and
+  `verify` commands run there. Omit `workdir` only when the work belongs in the
+  host's current directory — otherwise the sub-agent falls back to that cwd and a
+  requested absolute path may not be honored.
 - **Long tasks:** `dispatch_async` → then poll `job_status(wait_sec=25)` until
   status is `done` or `error`. `running` is not a result — keep polling.
 - **Multi-step work:** don't cram a whole plan into one dispatch. Use the

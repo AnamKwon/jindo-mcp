@@ -1110,7 +1110,7 @@ func TestDispatchModelPinsAuthorModel(t *testing.T) {
 		return ad, nil
 	}
 
-	res, err := o.DispatchModel("refactor the scheduler", "claude", "", pinned, "", "", false, nil)
+	res, err := o.DispatchModel("refactor the scheduler", "claude", "", pinned, "", "", false, nil, "")
 	if err != nil {
 		t.Fatalf("DispatchModel error: %v", err)
 	}
@@ -1148,7 +1148,7 @@ func TestDispatchModelGuidanceAppendsToSystemPrompt(t *testing.T) {
 	o := New(mem, mgr)
 	o.GetAdapter = func(name string) (agent.Adapter, error) { return cap, nil }
 
-	if _, err := o.DispatchModel(task, "claude", "", "", guidance, "", false, nil); err != nil {
+	if _, err := o.DispatchModel(task, "claude", "", "", guidance, "", false, nil, ""); err != nil {
 		t.Fatalf("DispatchModel error: %v", err)
 	}
 
@@ -1175,7 +1175,7 @@ func TestDispatchModelGuidanceAppendsToSystemPrompt(t *testing.T) {
 	cap2 := &captureAdapter{name: "claude", canned: cannedJSON}
 	o2 := New(mem2, mgr)
 	o2.GetAdapter = func(name string) (agent.Adapter, error) { return cap2, nil }
-	if _, err := o2.DispatchModel(task, "claude", "", "", "", "", false, nil); err != nil {
+	if _, err := o2.DispatchModel(task, "claude", "", "", "", "", false, nil, ""); err != nil {
 		t.Fatalf("DispatchModel (no guidance) error: %v", err)
 	}
 	idx2 := -1
@@ -1929,7 +1929,7 @@ func TestDispatchModelVerifyGate(t *testing.T) {
 			return newRecordingAdapter(t, name, cannedJSON, &argv), nil
 		}
 
-		got, err := o.DispatchModel("add a helper", "claude", "", "", "", "", false, []string{"go version"})
+		got, err := o.DispatchModel("add a helper", "claude", "", "", "", "", false, []string{"go version"}, "")
 		if err != nil {
 			t.Fatalf("DispatchModel error: %v", err)
 		}
@@ -1956,7 +1956,7 @@ func TestDispatchModelVerifyGate(t *testing.T) {
 			return newRecordingAdapter(t, name, cannedJSON, &argv), nil
 		}
 
-		got, err := o.DispatchModel("add a helper", "claude", "", "", "", "", false, []string{"go vet ./this-does-not-exist-xyz"})
+		got, err := o.DispatchModel("add a helper", "claude", "", "", "", "", false, []string{"go vet ./this-does-not-exist-xyz"}, "")
 		if err != nil {
 			t.Fatalf("DispatchModel error: %v (a failing verify must NOT error the dispatch)", err)
 		}
@@ -2020,7 +2020,7 @@ func TestDispatchModelVerifyReviseSucceeds(t *testing.T) {
 	ad := &verifyFlipAdapter{name: "claude", dir: dir, writeFrom: 2}
 	o.GetAdapter = func(name string) (agent.Adapter, error) { return ad, nil }
 
-	got, err := o.DispatchModel("add a helper", "claude", "", "", "", "", false, []string{"gofmt marker.go"})
+	got, err := o.DispatchModel("add a helper", "claude", "", "", "", "", false, []string{"gofmt marker.go"}, "")
 	if err != nil {
 		t.Fatalf("DispatchModel error: %v", err)
 	}
@@ -2053,7 +2053,7 @@ func TestDispatchModelVerifyReviseCapsOut(t *testing.T) {
 	ad := &verifyFlipAdapter{name: "claude", dir: dir, writeFrom: 0}
 	o.GetAdapter = func(name string) (agent.Adapter, error) { return ad, nil }
 
-	got, err := o.DispatchModel("add a helper", "claude", "", "", "", "", false, []string{"gofmt marker.go"})
+	got, err := o.DispatchModel("add a helper", "claude", "", "", "", "", false, []string{"gofmt marker.go"}, "")
 	if err != nil {
 		t.Fatalf("DispatchModel error: %v (a failing verify must NOT error the dispatch)", err)
 	}
@@ -2070,6 +2070,194 @@ func TestDispatchModelVerifyReviseCapsOut(t *testing.T) {
 	// of revision runs, never more.
 	if ad.calls != 1+verifyReviseRoundsMax {
 		t.Fatalf("author ran %d times, want %d (initial + clamped revisions)", ad.calls, 1+verifyReviseRoundsMax)
+	}
+}
+
+// workdirAdapter is a fake author that records the process dir it was anchored to
+// (via SetDir) and the extras it was handed, and optionally writes a valid Go
+// file into that dir on RunWith. It lets a workdir dispatch prove BOTH that the
+// adapter was SetDir'd to the workdir AND that the verify gate ran there (a
+// `gofmt marker.go` verify passes only because the file was written into — and
+// verify ran in — the workdir).
+type workdirAdapter struct {
+	name     string
+	writeGo  bool
+	dir      string // captured via SetDir
+	gotExtra []string
+}
+
+func (a *workdirAdapter) Name() string                             { return a.name }
+func (a *workdirAdapter) BuildCommand(task, model string) []string { return nil }
+func (a *workdirAdapter) BuildCommandWith(task, model string, extra []string) []string {
+	return nil
+}
+func (a *workdirAdapter) Run(task, model string) (string, error) { return "", nil }
+func (a *workdirAdapter) SetDir(dir string)                      { a.dir = dir }
+func (a *workdirAdapter) RunWith(task, model string, extra []string) (string, error) {
+	a.gotExtra = extra
+	if a.writeGo && a.dir != "" {
+		if err := os.WriteFile(filepath.Join(a.dir, "marker.go"), []byte("package flip\n"), 0o644); err != nil {
+			return "", err
+		}
+	}
+	return cannedJSON, nil
+}
+
+// TestDispatchModelWorkdir proves the per-dispatch working directory (FIX A):
+// the workdir is created if missing, the author adapter is anchored to it via
+// SetDir, the claude author is granted --add-dir <workdir> / the codex author
+// -C <workdir>, and the verify gate runs IN the workdir. An empty workdir adds
+// no grant (byte-identical extras).
+func TestDispatchModelWorkdir(t *testing.T) {
+	t.Run("claude: created, SetDir, --add-dir, verify runs in workdir", func(t *testing.T) {
+		// Nested/absent path so MkdirAll's create-if-missing is exercised.
+		workdir := filepath.Join(t.TempDir(), "nested", "target")
+
+		mem := memory.New(t.TempDir())
+		mgr, _ := newFakeManager(0)
+		o := New(mem, mgr)
+		ad := &workdirAdapter{name: "claude", writeGo: true}
+		o.GetAdapter = func(name string) (agent.Adapter, error) { return ad, nil }
+
+		// Verify `gofmt marker.go` can only pass if verify runs in the workdir,
+		// where the author wrote marker.go (the adapter writes into its SetDir dir).
+		got, err := o.DispatchModel("add a helper", "claude", "", "", "", "", false, []string{"gofmt marker.go"}, workdir)
+		if err != nil {
+			t.Fatalf("DispatchModel error: %v", err)
+		}
+		if fi, err := os.Stat(workdir); err != nil || !fi.IsDir() {
+			t.Fatalf("workdir %q not created as a directory: err=%v", workdir, err)
+		}
+		if ad.dir != workdir {
+			t.Fatalf("adapter SetDir = %q, want the workdir %q", ad.dir, workdir)
+		}
+		if !containsPair(ad.gotExtra, "--add-dir", workdir) {
+			t.Fatalf("claude extras missing --add-dir %q (workdir grant): %v", workdir, ad.gotExtra)
+		}
+		if got.Verify == nil || !got.Verify.Passed {
+			t.Fatalf("verify should PASS in the workdir (marker.go was written there): %+v", got.Verify)
+		}
+		if got.Status != "ok" {
+			t.Fatalf("status = %q, want ok (verify passed in workdir)", got.Status)
+		}
+	})
+
+	t.Run("codex: -C workdir", func(t *testing.T) {
+		workdir := t.TempDir()
+		mem := memory.New(t.TempDir())
+		mgr, _ := newFakeManager(0)
+		o := New(mem, mgr)
+		ad := &workdirAdapter{name: "codex"}
+		o.GetAdapter = func(name string) (agent.Adapter, error) { return ad, nil }
+
+		if _, err := o.DispatchModel("add a helper", "codex", "", "", "", "", false, nil, workdir); err != nil {
+			t.Fatalf("DispatchModel error: %v", err)
+		}
+		if ad.dir != workdir {
+			t.Fatalf("adapter SetDir = %q, want the workdir %q", ad.dir, workdir)
+		}
+		if !containsPair(ad.gotExtra, "-C", workdir) {
+			t.Fatalf("codex extras missing -C %q (workdir grant): %v", workdir, ad.gotExtra)
+		}
+	})
+
+	t.Run("empty workdir adds no grant (byte-identical)", func(t *testing.T) {
+		const sys, memDir, cwd = "SYS", "/mem", "/cwd"
+
+		_, claudeEmpty := buildDispatchArgs("claude", "t", sys, memDir, cwd, false, "", "")
+		_, claudeWD := buildDispatchArgs("claude", "t", sys, memDir, cwd, false, "", "/wd")
+		// Empty workdir must not grant either the resolved cwd or a workdir.
+		if containsPair(claudeEmpty, "--add-dir", cwd) || containsPair(claudeEmpty, "--add-dir", "/wd") {
+			t.Fatalf("claude empty-workdir extras must add no cwd/workdir --add-dir: %v", claudeEmpty)
+		}
+		if !containsPair(claudeWD, "--add-dir", "/wd") {
+			t.Fatalf("claude workdir extras missing --add-dir /wd: %v", claudeWD)
+		}
+		if len(claudeWD) != len(claudeEmpty)+2 {
+			t.Fatalf("claude workdir added %d args, want exactly 2 (--add-dir /wd): empty=%v wd=%v", len(claudeWD)-len(claudeEmpty), claudeEmpty, claudeWD)
+		}
+
+		_, codexEmpty := buildDispatchArgs("codex", "t", sys, memDir, cwd, false, "", "")
+		_, codexWD := buildDispatchArgs("codex", "t", sys, memDir, cwd, false, "", "/wd")
+		if hasFlag(codexEmpty, "-C") {
+			t.Fatalf("codex empty-workdir extras must add no -C: %v", codexEmpty)
+		}
+		if !containsPair(codexWD, "-C", "/wd") {
+			t.Fatalf("codex workdir extras missing -C /wd: %v", codexWD)
+		}
+		if len(codexWD) != len(codexEmpty)+2 {
+			t.Fatalf("codex workdir added %d args, want exactly 2 (-C /wd): empty=%v wd=%v", len(codexWD)-len(codexEmpty), codexEmpty, codexWD)
+		}
+	})
+}
+
+// TestDispatchModelVerifyFailSyncsMemoryStatus proves FIX B: when the verify gate
+// flips the returned status to "verify_failed", the authoritative memory record
+// is reconciled to that status instead of keeping the author's raw status ("ok").
+func TestDispatchModelVerifyFailSyncsMemoryStatus(t *testing.T) {
+	mem := memory.New(t.TempDir())
+	mgr, _ := newFakeManager(0)
+	o := New(mem, mgr)
+	var argv []string
+	o.GetAdapter = func(name string) (agent.Adapter, error) {
+		return newRecordingAdapter(t, name, cannedJSON, &argv), nil
+	}
+
+	// cannedJSON's author status is "ok"; a cwd-independent always-failing verify
+	// forces verify_failed, so the record's persisted "ok" must be synced.
+	got, err := o.DispatchModel("add a helper", "claude", "", "", "", "", false, []string{"go vet ./this-does-not-exist-xyz"}, "")
+	if err != nil {
+		t.Fatalf("DispatchModel error: %v", err)
+	}
+	if got.Status != "verify_failed" {
+		t.Fatalf("returned status = %q, want verify_failed", got.Status)
+	}
+	stored, ok := mem.Read(got.Key)
+	if !ok {
+		t.Fatalf("Read(%s) not found", got.Key)
+	}
+	entry, ok := stored.(map[string]any)
+	if !ok {
+		t.Fatalf("stored %s is %T, want map", got.Key, stored)
+	}
+	if entry["status"] != "verify_failed" {
+		t.Fatalf("persisted memory status = %v, want verify_failed (must agree with the returned status)", entry["status"])
+	}
+}
+
+// TestDispatchModelVerifyFailWithReviewCoherentSummary proves FIX C: a review=true
+// dispatch whose verify fails and triggers a revision returns a Result that is
+// NOT self-contradictory — reviews are populated AND the summary states the
+// verify gate failed (not the reviewless revision agent's raw summary claiming
+// nothing about review).
+func TestDispatchModelVerifyFailWithReviewCoherentSummary(t *testing.T) {
+	mem := memory.New(t.TempDir())
+	mgr, _ := newFakeManager(0)
+	calls := 0
+	o := New(mem, mgr)
+	// Author (claude) runs twice: initial + one verify revision. Reviewers approve
+	// once each (review runs before verify, on the initial result only).
+	o.GetAdapter = scriptedGetAdapter(map[string][]string{
+		"claude": {cannedJSON, cannedJSON},
+		"agy":    {reviewApproved},
+		"codex":  {reviewApproved},
+	}, &calls)
+
+	got, err := o.DispatchModel(reviewTask, "claude", "", "", "", "", true, []string{"go vet ./this-does-not-exist-xyz"}, "")
+	if err != nil {
+		t.Fatalf("DispatchModel error: %v", err)
+	}
+	if got.Status != "verify_failed" {
+		t.Fatalf("status = %q, want verify_failed", got.Status)
+	}
+	if got.VerifyRevisions != 1 {
+		t.Fatalf("VerifyRevisions = %d, want 1", got.VerifyRevisions)
+	}
+	if len(got.Reviews) == 0 {
+		t.Fatalf("Reviews is empty; want the pre-revision reviewers preserved")
+	}
+	if !strings.Contains(got.Summary, "verify gate failed") {
+		t.Fatalf("Summary = %q, want a jindo-composed summary containing %q (not the raw agent summary)", got.Summary, "verify gate failed")
 	}
 }
 
@@ -2201,17 +2389,17 @@ func TestBuildDispatchArgsEffortPerAgent(t *testing.T) {
 	const sys, mem, cwd = "SYS", "/mem", "/cwd"
 
 	// effort="high": each agent emits (or omits) its own flag.
-	_, claudeExtra := buildDispatchArgs("claude", "t", sys, mem, cwd, false, "high")
+	_, claudeExtra := buildDispatchArgs("claude", "t", sys, mem, cwd, false, "high", "")
 	if !containsPair(claudeExtra, "--effort", "high") {
 		t.Fatalf("claude extras missing --effort high: %v", claudeExtra)
 	}
 
-	_, codexExtra := buildDispatchArgs("codex", "t", sys, mem, cwd, false, "high")
+	_, codexExtra := buildDispatchArgs("codex", "t", sys, mem, cwd, false, "high", "")
 	if !containsPair(codexExtra, "-c", "model_reasoning_effort=high") {
 		t.Fatalf("codex extras missing -c model_reasoning_effort=high: %v", codexExtra)
 	}
 
-	_, agyExtra := buildDispatchArgs("agy", "t", sys, mem, cwd, false, "high")
+	_, agyExtra := buildDispatchArgs("agy", "t", sys, mem, cwd, false, "high", "")
 	if hasFlag(agyExtra, "--effort") {
 		t.Fatalf("agy extras must NOT contain --effort (effort is model-encoded): %v", agyExtra)
 	}
@@ -2223,11 +2411,11 @@ func TestBuildDispatchArgsEffortPerAgent(t *testing.T) {
 
 	// effort="" regression pin: no effort flag on any agent, and codex's extras
 	// are byte-identical to the pre-effort shape.
-	_, claudeNone := buildDispatchArgs("claude", "t", sys, mem, cwd, false, "")
+	_, claudeNone := buildDispatchArgs("claude", "t", sys, mem, cwd, false, "", "")
 	if hasFlag(claudeNone, "--effort") {
 		t.Fatalf("claude with effort=\"\" must add no --effort: %v", claudeNone)
 	}
-	_, codexNone := buildDispatchArgs("codex", "t", sys, mem, cwd, false, "")
+	_, codexNone := buildDispatchArgs("codex", "t", sys, mem, cwd, false, "", "")
 	if hasFlag(codexNone, "-c") {
 		t.Fatalf("codex with effort=\"\" must add no -c: %v", codexNone)
 	}
@@ -2249,17 +2437,17 @@ func TestBuildDispatchArgsSubAgentMCPIsolation(t *testing.T) {
 	const sys, mem, cwd = "SYS", "/mem", "/cwd"
 
 	for _, reviewMode := range []bool{false, true} {
-		_, claudeExtra := buildDispatchArgs("claude", "t", sys, mem, cwd, reviewMode, "")
+		_, claudeExtra := buildDispatchArgs("claude", "t", sys, mem, cwd, reviewMode, "", "")
 		if !hasFlag(claudeExtra, "--strict-mcp-config") {
 			t.Fatalf("claude extras (reviewMode=%v) missing --strict-mcp-config: %v", reviewMode, claudeExtra)
 		}
 
-		_, codexExtra := buildDispatchArgs("codex", "t", sys, mem, cwd, reviewMode, "")
+		_, codexExtra := buildDispatchArgs("codex", "t", sys, mem, cwd, reviewMode, "", "")
 		if !hasFlag(codexExtra, "--ignore-user-config") {
 			t.Fatalf("codex extras (reviewMode=%v) missing --ignore-user-config: %v", reviewMode, codexExtra)
 		}
 
-		_, agyExtra := buildDispatchArgs("agy", "t", sys, mem, cwd, reviewMode, "")
+		_, agyExtra := buildDispatchArgs("agy", "t", sys, mem, cwd, reviewMode, "", "")
 		if hasFlag(agyExtra, "--strict-mcp-config") || hasFlag(agyExtra, "--ignore-user-config") {
 			t.Fatalf("agy extras (reviewMode=%v) must contain no MCP isolation flag (agy has none): %v", reviewMode, agyExtra)
 		}
@@ -2293,7 +2481,7 @@ func TestDispatchModelTierDefaultEffort(t *testing.T) {
 	o := New(mem, mgr)
 	o.GetAdapter = func(name string) (agent.Adapter, error) { return cap, nil }
 
-	got, err := o.DispatchModel(task, "claude", "", "", "", "", false, nil)
+	got, err := o.DispatchModel(task, "claude", "", "", "", "", false, nil, "")
 	if err != nil {
 		t.Fatalf("DispatchModel error: %v", err)
 	}
@@ -2319,7 +2507,7 @@ func TestDispatchModelEffortOverrideWins(t *testing.T) {
 	o := New(mem, mgr)
 	o.GetAdapter = func(name string) (agent.Adapter, error) { return cap, nil }
 
-	got, err := o.DispatchModel(task, "claude", "", "", "", "xhigh", false, nil)
+	got, err := o.DispatchModel(task, "claude", "", "", "", "xhigh", false, nil, "")
 	if err != nil {
 		t.Fatalf("DispatchModel error: %v", err)
 	}

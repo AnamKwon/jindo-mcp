@@ -219,6 +219,15 @@ var effortSchemaProp = map[string]any{
 	"description": "Optional reasoning-effort level for the author run: one of \"low\", \"medium\", \"high\", \"xhigh\", \"max\". Overrides the per-difficulty-tier default effort for THIS dispatch. Applied per-agent (claude --effort; codex model_reasoning_effort, which clamps \"max\" to \"xhigh\"); agy encodes effort in its model name and ignores this. Omit to use the tier default.",
 }
 
+// workdirSchemaProp is the shared JSON Schema for the optional "workdir"
+// argument on both dispatch and dispatch_async: the working directory the
+// dispatched work runs in. Defined once so the two tools advertise an identical
+// shape.
+var workdirSchemaProp = map[string]any{
+	"type":        "string",
+	"description": "Optional absolute working directory the dispatched work runs in: the author sub-agent is anchored here (process cwd + granted write access) and verify commands run here. Created if missing. Omit to use the server's current working directory.",
+}
+
 // validEfforts is the closed set of reasoning-effort levels the dispatch tools
 // accept, matching claude's supported range (codex is adapted at the edge; see
 // orchestrator.effortForCodex). An empty effort is always valid (means "use the
@@ -281,7 +290,8 @@ func tools() []toolDef {
 						"type":        "boolean",
 						"description": "Optional opt-in cross-model peer review of the dispatched result. Defaults to false (no review); set true to have a different model review the result and, on a critical finding, trigger one revision round.",
 					},
-					"verify": verifySchemaProp,
+					"verify":  verifySchemaProp,
+					"workdir": workdirSchemaProp,
 				},
 				"required": []string{"task"},
 			},
@@ -306,13 +316,14 @@ func tools() []toolDef {
 						"type":        "boolean",
 						"description": "Optional opt-in cross-model peer review of the dispatched result. Defaults to false (no review); set true to have a different model review the result and, on a critical finding, trigger one revision round.",
 					},
-					"verify": verifySchemaProp,
+					"verify":  verifySchemaProp,
+					"workdir": workdirSchemaProp,
 				},
 				"required": []string{"task"},
 			},
 		},
 		{
-			Name: "dispatch_multi",
+			Name:        "dispatch_multi",
 			Description: "Fan a task out to multiple models concurrently in read-only \"propose\" mode: each model returns its OWN complete candidate solution (no files are written, so the candidates never clobber each other). Returns each model's candidate; with synthesis=\"judge\" it also returns a jindo-synthesized answer merging the candidates. This is the general collaboration primitive for coding AND non-coding tasks; the host decides when to use it versus single dispatch and normally synthesizes the candidates itself.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -513,6 +524,7 @@ type dispatchArgs struct {
 	Effort   string   `json:"effort"`
 	Review   bool     `json:"review"`
 	Verify   []string `json:"verify"`
+	Workdir  string   `json:"workdir"`
 }
 
 // runDispatch executes in against the orchestrator (via DispatchModel, which
@@ -520,7 +532,7 @@ type dispatchArgs struct {
 // Review flag) and builds the JSON-able payload map both the sync and async
 // tools return on success.
 func runDispatch(o *orchestrator.Orchestrator, in dispatchArgs) (map[string]any, error) {
-	res, err := o.DispatchModel(in.Task, in.Agent, in.Priority, in.Model, in.Guidance, in.Effort, in.Review, in.Verify)
+	res, err := o.DispatchModel(in.Task, in.Agent, in.Priority, in.Model, in.Guidance, in.Effort, in.Review, in.Verify, in.Workdir)
 	if err != nil {
 		return nil, err
 	}

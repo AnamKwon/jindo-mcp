@@ -286,7 +286,16 @@ func (o *Orchestrator) dispatchStore() dispatchMem {
 // clamps "max"->"xhigh"). agy encodes effort in its model display name and has
 // no flag, so it (and the default case) ignore effort. effort == "" adds NO
 // flag on any branch — byte-identical to the pre-effort dispatch.
-func buildDispatchArgs(agentName, task, sysPrompt, memDir, cwd string, reviewMode bool, effort string) (taskToSend string, extra []string) {
+// workdir, when non-empty, is the EXPLICIT per-dispatch working directory (see
+// DispatchModel). It gates the additional claude/codex write-access grants
+// (claude --add-dir workdir; codex exec -C workdir) so the sub-agent is anchored
+// in the caller's target directory. It is deliberately SEPARATE from cwd: cwd is
+// the resolved process working directory (workdir when set, else jindo's
+// os.Getwd()) and is always non-empty, so it cannot distinguish "no workdir
+// given" from the getwd fallback; workdir can. workdir == "" adds NO extra grant
+// on any branch, byte-identical to the pre-workdir args (agy still uses cwd for
+// its pre-existing --add-dir cwd grant, unchanged).
+func buildDispatchArgs(agentName, task, sysPrompt, memDir, cwd string, reviewMode bool, effort, workdir string) (taskToSend string, extra []string) {
 	switch agentName {
 	case "claude":
 		extra := []string{
@@ -297,6 +306,12 @@ func buildDispatchArgs(agentName, task, sysPrompt, memDir, cwd string, reviewMod
 			// spawns. --strict-mcp-config with no --mcp-config yields zero MCP
 			// servers for the sub-agent.
 			"--strict-mcp-config",
+		}
+		// Grant the sub-agent write access to the EXPLICIT per-dispatch working
+		// directory (in addition to the memory dir above). workdir == "" preserves
+		// the prior args exactly.
+		if workdir != "" {
+			extra = append(extra, "--add-dir", workdir)
 		}
 		// The reasoning-effort flag rides the same extras on both the review and
 		// the normal path; reviewers pass effort=="" so this is a no-op for them,
@@ -338,6 +353,12 @@ func buildDispatchArgs(agentName, task, sysPrompt, memDir, cwd string, reviewMod
 			extra = append(extra, "-c", "model_reasoning_effort="+effortForCodex(effort))
 		}
 		extra = append(extra, "-s", sandbox)
+		// Anchor codex exec's working root to the EXPLICIT per-dispatch workdir via
+		// -C (codex's working-directory flag). workdir == "" preserves the prior
+		// args exactly (codex then inherits jindo's process cwd, as before).
+		if workdir != "" {
+			extra = append(extra, "-C", workdir)
+		}
 		// Skip ~/.codex/config.toml so the sub-agent doesn't reload the host's
 		// mcp_servers (incl. jindo itself) — same recursion/overhead concern as
 		// claude's --strict-mcp-config above. Auth still works via CODEX_HOME.
@@ -374,7 +395,7 @@ func effortForCodex(effort string) string {
 // propagated. Memory side-effect errors are propagated too rather than silently
 // swallowed, so a corrupted store surfaces to the caller.
 func (o *Orchestrator) Dispatch(task, agentName, priority string) (Result, error) {
-	return o.dispatch(task, agentName, priority, "", "", "", false, nil)
+	return o.dispatch(task, agentName, priority, "", "", "", false, nil, "")
 }
 
 // DispatchWithReview runs the same author dispatch as Dispatch, then a
@@ -382,7 +403,7 @@ func (o *Orchestrator) Dispatch(task, agentName, priority string) (Result, error
 // the opt-in entry point (review is DEFAULT OFF via Dispatch); callers that want
 // review — e.g. the MCP dispatch tool exposing a review flag — call this instead.
 func (o *Orchestrator) DispatchWithReview(task, agentName, priority string) (Result, error) {
-	return o.dispatch(task, agentName, priority, "", "", "", true, nil)
+	return o.dispatch(task, agentName, priority, "", "", "", true, nil, "")
 }
 
 // DispatchModel is the model-aware entry point: it runs the same pipeline as
@@ -402,8 +423,13 @@ func (o *Orchestrator) DispatchWithReview(task, agentName, priority string) (Res
 // routing.EffortForDifficulty(tier). effort == "" falls back to the tier
 // default, and when that is also "" no effort flag is added at all — exactly
 // the pre-effort behavior.
-func (o *Orchestrator) DispatchModel(task, agentName, priority, model, guidance, effort string, review bool, verify []string) (Result, error) {
-	return o.dispatch(task, agentName, priority, model, guidance, effort, review, verify)
+//
+// workdir, when non-empty, is the per-dispatch working directory the author
+// sub-agent is anchored in (process cwd + granted write access) and the verify
+// commands run in; it is created if missing. workdir == "" reproduces the prior
+// behavior exactly (the author and verify run in jindo's own os.Getwd()).
+func (o *Orchestrator) DispatchModel(task, agentName, priority, model, guidance, effort string, review bool, verify []string, workdir string) (Result, error) {
+	return o.dispatch(task, agentName, priority, model, guidance, effort, review, verify, workdir)
 }
 
 // PlanResult is the outcome of a Plan: the agent+model that produced the plan,
@@ -472,7 +498,7 @@ func (o *Orchestrator) Plan(goal, agent, model string) (PlanResult, error) {
 
 	// Read-only planner run: same per-CLI seam as reviewWith (reviewMode=true), so
 	// the planner can read memory via --add-dir but cannot write/edit files.
-	taskToSend, extra := buildDispatchArgs(agent, planDirective, sysPrompt, memDir, cwd, true, "")
+	taskToSend, extra := buildDispatchArgs(agent, planDirective, sysPrompt, memDir, cwd, true, "", "")
 
 	ad, err := o.GetAdapter(agent)
 	if err != nil {
@@ -532,7 +558,7 @@ func (o *Orchestrator) Plan(goal, agent, model string) (PlanResult, error) {
 // than one revision round and no recursion. Each reviewer's outcome is exposed on
 // Result.Reviews; the aggregate (worst verdict, summed findings) drives the
 // dispatch.log line and status.
-func (o *Orchestrator) dispatch(task, agentName, priority, model, guidance, effort string, review bool, verify []string) (Result, error) {
+func (o *Orchestrator) dispatch(task, agentName, priority, model, guidance, effort string, review bool, verify []string, workdir string) (Result, error) {
 	// Validate the objective verify gate BEFORE running anything (routing, the
 	// author, or the review), so an invalid/unsafe command list refuses the whole
 	// dispatch rather than doing work we would then have to discard. This mirrors
@@ -541,17 +567,33 @@ func (o *Orchestrator) dispatch(task, agentName, priority, model, guidance, effo
 		return Result{}, err
 	}
 
-	// Best-effort changed-files manifest: snapshot git status BEFORE the author
-	// runs (cwd matches what runAuthor itself resolves via os.Getwd, falling back
-	// the same way). ok is false outside a git repo, in which case Result.Files
-	// simply stays nil below — this never fails the dispatch.
-	cwd, err := os.Getwd()
-	if err != nil {
-		cwd = ""
+	// Resolve the effective working directory ONCE: a non-empty workdir is the
+	// per-dispatch anchor (created if missing — a normal error if that fails, so
+	// an unusable workdir refuses the dispatch before any side effect), used for
+	// BOTH the git changed-files snapshot base and the author run below. workdir
+	// == "" preserves the prior behavior exactly: fall back to jindo's os.Getwd()
+	// (empty on failure), matching what runAuthor itself resolves.
+	var cwd string
+	if workdir != "" {
+		if err := os.MkdirAll(workdir, 0o755); err != nil {
+			return Result{}, fmt.Errorf("orchestrator: create workdir %q: %w", workdir, err)
+		}
+		cwd = workdir
+	} else {
+		wd, err := os.Getwd()
+		if err != nil {
+			wd = ""
+		}
+		cwd = wd
 	}
+
+	// Best-effort changed-files manifest: snapshot git status BEFORE the author
+	// runs, in the effective working dir resolved above. ok is false outside a
+	// git repo, in which case Result.Files simply stays nil below — this never
+	// fails the dispatch.
 	before, filesOK := gitStatusSnapshot(cwd)
 
-	ar, err := o.runAuthor(task, agentName, priority, model, guidance, effort)
+	ar, err := o.runAuthor(task, agentName, priority, model, guidance, effort, workdir)
 	if err != nil {
 		return Result{}, err
 	}
@@ -600,7 +642,7 @@ func (o *Orchestrator) dispatch(task, agentName, priority, model, guidance, effo
 				// re-dispatch failure ends the automatic revision (it is not a Go
 				// error of the whole dispatch); the last verify result stands.
 				revisedTask := task + "\n\n" + renderVerifyFailure(vr)
-				ar2, rerr := o.runAuthor(revisedTask, final.result.Agent, priority, model, guidance, effort)
+				ar2, rerr := o.runAuthor(revisedTask, final.result.Agent, priority, model, guidance, effort, workdir)
 				if rerr != nil {
 					_ = o.dispatchStore().AppendNote("orchestrator", fmt.Sprintf("verify: re-dispatch failed for %s: %v", final.key, rerr))
 					break
@@ -621,6 +663,17 @@ func (o *Orchestrator) dispatch(task, agentName, priority, model, guidance, effo
 			}
 			if !res.Verify.Passed {
 				res.Status = "verify_failed"
+				// FIX C — coherent Result: a verify-forced revision replaced res
+				// (summary/status) with the REVIEWLESS revision round while keeping
+				// res.Reviews from the PRE-revision reviewed round. Left as-is the
+				// response would show populated reviews next to a summary claiming
+				// review did not run. When reviews are present, replace the revision
+				// agent's raw summary with a jindo-composed one that states plainly
+				// that the review was of the pre-revision result. (No reviews => keep
+				// the revision agent's summary.)
+				if len(res.Reviews) > 0 {
+					res.Summary = fmt.Sprintf("verify gate failed after %d automatic revision round(s); returning the revised result. The peer review in `reviews` was of the PRE-revision result.", res.VerifyRevisions)
+				}
 			}
 		}
 	}
@@ -629,6 +682,19 @@ func (o *Orchestrator) dispatch(task, agentName, priority, model, guidance, effo
 	// review-revision) now, just before returning the successful Result.
 	if filesOK {
 		res.Files = changedFilesSince(cwd, before)
+	}
+
+	// FIX B — memory status sync: the pipeline may have flipped res.Status past
+	// what the author's authoritative record captured (e.g. "error"/"ok" ->
+	// "verify_failed" / "review_failed"), so the persisted record would otherwise
+	// disagree with the returned status. Reconcile the authoritative record to
+	// the final status. Best-effort: a persist failure records a note and never
+	// fails the dispatch (the returned Result already carries the true status).
+	if final.key != "" && final.authRecord != nil && final.authRecord["status"] != res.Status {
+		final.authRecord["status"] = res.Status
+		if err := o.dispatchStore().Upsert(final.key, final.authRecord, final.result.Agent); err != nil {
+			_ = o.dispatchStore().AppendNote("orchestrator", fmt.Sprintf("status sync: upsert %s failed: %v", final.key, err))
+		}
 	}
 	return res, nil
 }
@@ -654,6 +720,12 @@ type authorOutcome struct {
 	// guidance) so the override survives a revision rather than silently
 	// dropping back to the tier default.
 	effort string
+	// workdir is the EXPLICIT per-dispatch working directory the author was
+	// dispatched with ("" when none). A review- or verify-forced re-dispatch
+	// reuses it (like guidance/effort) so the revision runs in — and grants the
+	// sub-agent — the same directory rather than silently falling back to
+	// jindo's cwd. Distinct from cwd (which is the resolved dir, never empty).
+	workdir string
 }
 
 // runAuthor is the non-reviewing author core: the full headless-contract dispatch
@@ -681,7 +753,13 @@ type authorOutcome struct {
 // flag); a resolved "" adds no flag. The raw host override is carried on the
 // returned authorOutcome so a review- or verify-forced re-dispatch keeps the
 // same override rather than silently dropping it.
-func (o *Orchestrator) runAuthor(task, agentName, priority, model, guidance, effort string) (authorOutcome, error) {
+//
+// workdir, when non-empty, is the per-dispatch working directory: it is used as
+// the author's process cwd (bound on the adapter via SetDir before RunWith),
+// stored on authorOutcome.cwd so the verify gate runs there, and granted to the
+// sub-agent via buildDispatchArgs. workdir == "" reproduces the prior behavior
+// exactly: cwd falls back to os.Getwd() (then memDir).
+func (o *Orchestrator) runAuthor(task, agentName, priority, model, guidance, effort, workdir string) (authorOutcome, error) {
 	// Sensitive-path gate: runs BEFORE routing/memory writes/adapter dispatch,
 	// so a task referencing a sensitive file (.env, .mcp.json,
 	// .claude/settings.local.json, ssh keys, etc.) never reaches any CLI, on
@@ -729,11 +807,18 @@ func (o *Orchestrator) runAuthor(task, agentName, priority, model, guidance, eff
 	// The actual process working directory — needed so agy (which, unlike
 	// claude/codex, does not default to operating on the real cwd — see
 	// buildDispatchArgs) can be explicitly granted the real project directory
-	// instead of silently falling back to its own scratch location. Fall back
-	// to memDir if Getwd fails for any reason (better than an empty grant).
-	cwd, err := os.Getwd()
-	if err != nil {
-		cwd = memDir
+	// instead of silently falling back to its own scratch location. A non-empty
+	// per-dispatch workdir wins as the anchor; otherwise fall back to os.Getwd()
+	// (then memDir if Getwd fails), matching the pre-workdir behavior.
+	var cwd string
+	if workdir != "" {
+		cwd = workdir
+	} else {
+		wd, werr := os.Getwd()
+		if werr != nil {
+			wd = memDir
+		}
+		cwd = wd
 	}
 
 	// Resolve the reasoning effort for this run: a non-empty host override wins;
@@ -750,7 +835,7 @@ func (o *Orchestrator) runAuthor(task, agentName, priority, model, guidance, eff
 	// live-confirmed permission-gate and agy directory-targeting bugs). Only
 	// taskToSend is dispatched — the ORIGINAL task is what the memory records
 	// below persist.
-	taskToSend, extra := buildDispatchArgs(route.Agent, task, sysPrompt, memDir, cwd, false, resolvedEffort)
+	taskToSend, extra := buildDispatchArgs(route.Agent, task, sysPrompt, memDir, cwd, false, resolvedEffort, workdir)
 
 	// Record the routing intent before execution so the decision is visible even
 	// if the adapter run fails or blocks. Note + record are separate lock-scoped
@@ -775,6 +860,16 @@ func (o *Orchestrator) runAuthor(task, agentName, priority, model, guidance, eff
 	ad, err := o.GetAdapter(route.Agent)
 	if err != nil {
 		return authorOutcome{}, err
+	}
+
+	// Anchor the sub-agent's process working directory to cwd (the per-dispatch
+	// workdir when set, else jindo's own cwd — the same value as before, so the
+	// no-workdir path is behaviorally unchanged). Done via a structural type
+	// assertion so no adapter-interface change is needed: adapters that honor a
+	// process dir implement SetDir (the real *cliAdapter does); test fakes that
+	// don't are simply left alone.
+	if d, ok := ad.(interface{ SetDir(string) }); ok {
+		d.SetDir(cwd)
 	}
 
 	// Capture the injection context the agent is about to read from memDir — the
@@ -966,6 +1061,7 @@ func (o *Orchestrator) runAuthor(task, agentName, priority, model, guidance, eff
 		logEntry:   logEntry,
 		guidance:   guidance,
 		effort:     effort,
+		workdir:    workdir,
 	}, nil
 }
 
@@ -1012,7 +1108,7 @@ func (o *Orchestrator) reviewWith(sel routing.Selection, task string, ar authorO
 	// arts carries the REAL changed files (and any exec output) so the reviewer
 	// inspects the actual change rather than only the author's self-report.
 	reviewPrompt := agentproto.BuildReviewPrompt(ar.memDir, task, ar.result.Result, arts)
-	taskToSend, extra := buildDispatchArgs(sel.Agent, reviewDirective, reviewPrompt, ar.memDir, ar.cwd, true, "")
+	taskToSend, extra := buildDispatchArgs(sel.Agent, reviewDirective, reviewPrompt, ar.memDir, ar.cwd, true, "", "")
 
 	stdout, err := ad.RunWith(taskToSend, sel.Model, extra)
 	if err != nil {
@@ -1099,7 +1195,7 @@ func (o *Orchestrator) proposeOne(task, model, guidance, memDir, cwd string) Can
 	// Read-only propose run: same per-CLI seam as reviewWith (reviewMode=true), so
 	// the candidate can read memory via --add-dir but cannot write/edit files —
 	// this is what lets N models run concurrently without clobbering each other.
-	taskToSend, extra := buildDispatchArgs(route.Agent, proposeDirective, sysPrompt, memDir, cwd, true, "")
+	taskToSend, extra := buildDispatchArgs(route.Agent, proposeDirective, sysPrompt, memDir, cwd, true, "", "")
 
 	ad, err := o.GetAdapter(route.Agent)
 	if err != nil {
@@ -1189,7 +1285,7 @@ func (o *Orchestrator) judgeCandidates(task string, candidates []Candidate, judg
 		solutions[i] = c.Result
 	}
 	sysPrompt := agentproto.BuildJudgePrompt(memDir, task, solutions)
-	taskToSend, extra := buildDispatchArgs(route.Agent, proposeDirective, sysPrompt, memDir, cwd, true, "")
+	taskToSend, extra := buildDispatchArgs(route.Agent, proposeDirective, sysPrompt, memDir, cwd, true, "", "")
 
 	stdout, err := ad.RunWith(taskToSend, route.Model, extra)
 	if err != nil {
@@ -1301,7 +1397,7 @@ func (o *Orchestrator) runReviews(task, priority string, ar authorOutcome, arts 
 	// pipeline must still emit its consolidated record); we mark the outcome
 	// review_failed and keep the ORIGINAL author result + round-1 per-reviewer list.
 	revisedTask := task + "\n\n" + renderFindings(agentproto.ReviewResponse{Findings: mergeFindings(results)})
-	ar2, err := o.runAuthor(revisedTask, ar.result.Agent, priority, "", ar.guidance, ar.effort)
+	ar2, err := o.runAuthor(revisedTask, ar.result.Agent, priority, "", ar.guidance, ar.effort, ar.workdir)
 	if err != nil {
 		_ = mem.AppendNote("orchestrator", fmt.Sprintf("review: re-dispatch failed for %s: %v", ar.key, err))
 		return ar, aggregateReviews(perReviewer, "review_failed", 1), perReviewer
