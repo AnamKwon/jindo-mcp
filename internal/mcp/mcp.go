@@ -314,6 +314,14 @@ var workdirSchemaProp = map[string]any{
 	"description": "Optional absolute working directory the dispatched work runs in: the author sub-agent is anchored here (process cwd + granted write access) and verify commands run here. Created if missing. Omit to use the server's current working directory.",
 }
 
+// isolateSchemaProp is the shared JSON Schema for the optional "isolate" argument
+// on both dispatch and dispatch_async. Defined once so the two tools advertise an
+// identical shape.
+var isolateSchemaProp = map[string]any{
+	"type":        "boolean",
+	"description": "Run the dispatch inside an ephemeral git worktree branched off HEAD; on success the changes are committed to a returned branch and the worktree is removed (the caller's working tree is never modified by jindo — the HOST merges the returned branch); on failure the worktree is discarded so the caller's tree stays clean. Requires workdir to be inside a git repository. Recommended together with dispatch_async for long write tasks so a host idle-timeout abort can never leave partial changes.",
+}
+
 // validEfforts is the closed set of reasoning-effort levels the dispatch tools
 // accept, matching claude's supported range (codex is adapted at the edge; see
 // orchestrator.effortForCodex). An empty effort is always valid (means "use the
@@ -378,6 +386,7 @@ func tools() []toolDef {
 					},
 					"verify":  verifySchemaProp,
 					"workdir": workdirSchemaProp,
+					"isolate": isolateSchemaProp,
 				},
 				"required": []string{"task"},
 			},
@@ -404,6 +413,7 @@ func tools() []toolDef {
 					},
 					"verify":  verifySchemaProp,
 					"workdir": workdirSchemaProp,
+					"isolate": isolateSchemaProp,
 				},
 				"required": []string{"task"},
 			},
@@ -634,8 +644,8 @@ func (s *Server) toolsCall(req *Request) Response {
 }
 
 // dispatchArgs is the decoded {task, agent?, model?, priority?, guidance?,
-// effort?, review?} argument shape shared by the sync "dispatch" and async
-// "dispatch_async" tools.
+// effort?, review?, verify?, workdir?, isolate?} argument shape shared by the
+// sync "dispatch" and async "dispatch_async" tools.
 type dispatchArgs struct {
 	Task     string   `json:"task"`
 	Agent    string   `json:"agent"`
@@ -646,14 +656,24 @@ type dispatchArgs struct {
 	Review   bool     `json:"review"`
 	Verify   []string `json:"verify"`
 	Workdir  string   `json:"workdir"`
+	Isolate  bool     `json:"isolate"`
 }
 
 // runDispatch executes in against the orchestrator (via DispatchModel, which
 // honors the optional model pin, the optional task-specific guidance, and the
 // Review flag) and builds the JSON-able payload map both the sync and async
-// tools return on success.
+// tools return on success. When in.Isolate is set, the run is routed through
+// DispatchIsolated instead so it executes in an ephemeral git worktree and never
+// leaves partial changes in the caller's working tree (see DispatchIsolated);
+// everything else about the payload is unchanged.
 func runDispatch(o *orchestrator.Orchestrator, in dispatchArgs) (map[string]any, error) {
-	res, err := o.DispatchModel(in.Task, in.Agent, in.Priority, in.Model, in.Guidance, in.Effort, in.Review, in.Verify, in.Workdir)
+	var res orchestrator.Result
+	var err error
+	if in.Isolate {
+		res, err = o.DispatchIsolated(in.Task, in.Agent, in.Priority, in.Model, in.Guidance, in.Effort, in.Review, in.Verify, in.Workdir)
+	} else {
+		res, err = o.DispatchModel(in.Task, in.Agent, in.Priority, in.Model, in.Guidance, in.Effort, in.Review, in.Verify, in.Workdir)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -686,6 +706,13 @@ func runDispatch(o *orchestrator.Orchestrator, in dispatchArgs) (map[string]any,
 	// outside a git repo or when nothing changed, keeping the legacy payload.
 	if len(res.Files) > 0 {
 		payload["files"] = res.Files
+	}
+	// Surface the ephemeral-worktree outcome only when isolate mode ran, so the
+	// host learns the branch it must merge (on success) or that the worktree was
+	// discarded (on failure/no-change). Omitted for a non-isolate dispatch, keeping
+	// the legacy payload shape.
+	if res.Isolation != nil {
+		payload["isolation"] = res.Isolation
 	}
 	return payload, nil
 }

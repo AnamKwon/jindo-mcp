@@ -2850,3 +2850,127 @@ func TestPlanGateInvalidVerifyIsConfigError(t *testing.T) {
 		t.Fatalf("PlanGate error = nil, want a gate-config error for a non-allowlisted verify command")
 	}
 }
+
+// newIsolateRepo builds a temp git repo with an initial commit (so HEAD exists
+// for `worktree add ... HEAD`) and returns its path. It mirrors changedfiles_test's
+// runGit setup.
+func newIsolateRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "test@test.com")
+	runGit(t, repo, "config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(repo, "seed.txt"), []byte("seed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "-A")
+	runGit(t, repo, "commit", "-m", "init")
+	return repo
+}
+
+// TestDispatchIsolated proves the ephemeral-worktree contract: a write dispatch
+// runs inside a throwaway git worktree branched off HEAD and NEVER leaves partial
+// changes in the caller's tree. On success WITH changes it commits onto a returned
+// branch and removes the worktree; on failure/no-change it discards both; a
+// non-git workdir is refused.
+func TestDispatchIsolated(t *testing.T) {
+	// A deterministic route so GetAdapter always yields our fake claude author.
+	fixedRoute := func(task, agentName, priority, model string) (routing.Selection, error) {
+		return routing.Selection{Agent: "claude", Model: "m", Difficulty: "normal"}, nil
+	}
+
+	t.Run("success with changes: committed to branch, worktree removed, base clean", func(t *testing.T) {
+		repo := newIsolateRepo(t)
+		mem := memory.New(t.TempDir())
+		mgr, _ := newFakeManager(0)
+		o := New(mem, mgr)
+		o.Route = fixedRoute
+		ad := &workdirAdapter{name: "claude", writeGo: true} // writes marker.go into its SetDir dir
+		o.GetAdapter = func(name string) (agent.Adapter, error) { return ad, nil }
+
+		res, err := o.DispatchIsolated("add a helper", "claude", "", "", "", "", false, nil, repo)
+		if err != nil {
+			t.Fatalf("DispatchIsolated error: %v", err)
+		}
+		if res.Isolation == nil || !res.Isolation.Committed {
+			t.Fatalf("expected Isolation.Committed=true, got %+v", res.Isolation)
+		}
+		branch := res.Isolation.Branch
+		if branch == "" {
+			t.Fatalf("expected a non-empty Isolation.Branch on the success path")
+		}
+		if res.Isolation.WorktreePath != "" {
+			t.Fatalf("WorktreePath must be empty after the worktree is removed, got %q", res.Isolation.WorktreePath)
+		}
+		if res.Isolation.Merged {
+			t.Fatalf("Merged must be false (jindo never auto-merges)")
+		}
+		// The branch exists and its committed tree carries the authored file.
+		if _, err := gitCmd(repo, "rev-parse", "--verify", branch); err != nil {
+			t.Fatalf("branch %q should exist: %v", branch, err)
+		}
+		if _, err := gitCmd(repo, "show", branch+":marker.go"); err != nil {
+			t.Fatalf("committed branch %q should contain marker.go: %v", branch, err)
+		}
+		// The worktree was removed (no linked worktree under .jindo/wt remains).
+		if list, _ := gitCmd(repo, "worktree", "list"); strings.Contains(list, filepath.Join(".jindo", "wt")) {
+			t.Fatalf("expected the ephemeral worktree to be removed, worktree list:\n%s", list)
+		}
+		// The BASE working tree is untouched: no marker.go and a clean status (the
+		// change lives ONLY on the branch until the host merges it).
+		if _, err := os.Stat(filepath.Join(repo, "marker.go")); !os.IsNotExist(err) {
+			t.Fatalf("base tree must NOT contain marker.go (err=%v)", err)
+		}
+		if st, _ := gitCmd(repo, "status", "--porcelain"); st != "" {
+			t.Fatalf("base tree must be clean, got status:\n%s", st)
+		}
+	})
+
+	t.Run("no changes: not committed, worktree and branch discarded, base clean", func(t *testing.T) {
+		repo := newIsolateRepo(t)
+		mem := memory.New(t.TempDir())
+		mgr, _ := newFakeManager(0)
+		o := New(mem, mgr)
+		o.Route = fixedRoute
+		ad := &workdirAdapter{name: "claude", writeGo: false} // writes nothing
+		o.GetAdapter = func(name string) (agent.Adapter, error) { return ad, nil }
+
+		res, err := o.DispatchIsolated("add a helper", "claude", "", "", "", "", false, nil, repo)
+		if err != nil {
+			t.Fatalf("DispatchIsolated error: %v", err)
+		}
+		if res.Isolation == nil || res.Isolation.Committed {
+			t.Fatalf("expected Isolation.Committed=false on the no-change path, got %+v", res.Isolation)
+		}
+		// No throwaway branch survives, and no worktree remains.
+		if br, _ := gitCmd(repo, "branch", "--list", "jindo/iso-*"); strings.TrimSpace(br) != "" {
+			t.Fatalf("expected no jindo/iso-* branch to survive, got: %q", br)
+		}
+		if list, _ := gitCmd(repo, "worktree", "list"); strings.Contains(list, filepath.Join(".jindo", "wt")) {
+			t.Fatalf("expected the ephemeral worktree to be removed, worktree list:\n%s", list)
+		}
+		if st, _ := gitCmd(repo, "status", "--porcelain"); st != "" {
+			t.Fatalf("base tree must be clean, got status:\n%s", st)
+		}
+	})
+
+	t.Run("non-git workdir is refused", func(t *testing.T) {
+		mem := memory.New(t.TempDir())
+		mgr, _ := newFakeManager(0)
+		o := New(mem, mgr)
+		o.Route = fixedRoute
+		o.GetAdapter = func(name string) (agent.Adapter, error) {
+			t.Fatalf("GetAdapter must not be called when workdir is not a git repo")
+			return nil, nil
+		}
+
+		// A non-git directory.
+		if _, err := o.DispatchIsolated("add a helper", "claude", "", "", "", "", false, nil, t.TempDir()); err == nil {
+			t.Fatalf("expected an error for a non-git workdir")
+		}
+		// An empty workdir.
+		if _, err := o.DispatchIsolated("add a helper", "claude", "", "", "", "", false, nil, ""); err == nil {
+			t.Fatalf("expected an error for an empty workdir")
+		}
+	})
+}

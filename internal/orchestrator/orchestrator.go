@@ -39,6 +39,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -185,6 +186,31 @@ type Result struct {
 	// shape — and rises to at most verifyReviseRoundsMax when verify keeps
 	// failing. The count is deterministic: it depends only on verify outcomes.
 	VerifyRevisions int
+	// Isolation records the ephemeral-worktree outcome when the dispatch ran in
+	// isolate mode (see DispatchIsolated); nil on a normal dispatch, preserving the
+	// prior Result shape. When set, the caller's own working tree was NEVER written
+	// by jindo — on success the changes live on Isolation.Branch for the HOST to
+	// merge, and on failure/no-change the worktree and branch are discarded.
+	Isolation *Isolation
+}
+
+// Isolation records the outcome of an isolate-mode dispatch (see
+// DispatchIsolated): the dispatch ran inside an EPHEMERAL git worktree branched
+// off the workdir repo's HEAD so a slow or host-aborted dispatch can NEVER leave
+// partial changes in the caller's own working tree.
+//
+// On SUCCESS with changes the worktree's changes are committed on Branch and the
+// worktree is then REMOVED (so WorktreePath stays empty) — the branch, carrying
+// the commit, is all that remains and the HOST merges it (`git merge <branch>`).
+// jindo NEVER auto-merges, so Merged is always false here; it is kept in the
+// shape only so a future auto-merge could set it. On failure / no changes
+// Committed is false and both the worktree and the throwaway branch are
+// discarded, leaving the caller's tree pristine.
+type Isolation struct {
+	WorktreePath string `json:"worktree_path,omitempty"`
+	Branch       string `json:"branch,omitempty"`
+	Committed    bool   `json:"committed"`
+	Merged       bool   `json:"merged"`
 }
 
 // New builds an Orchestrator over the given shared memory and tmux manager,
@@ -430,6 +456,135 @@ func (o *Orchestrator) DispatchWithReview(task, agentName, priority string) (Res
 // behavior exactly (the author and verify run in jindo's own os.Getwd()).
 func (o *Orchestrator) DispatchModel(task, agentName, priority, model, guidance, effort string, review bool, verify []string, workdir string) (Result, error) {
 	return o.dispatch(task, agentName, priority, model, guidance, effort, review, verify, workdir)
+}
+
+// DispatchIsolated runs a write dispatch inside an EPHEMERAL git worktree so the
+// caller's own working tree is NEVER written by jindo. It solves the failure mode
+// where a host aborts a slow dispatch (idle timeout) while the sub-agent keeps
+// writing files into the caller's checkout: because the sub-agent only ever
+// writes into a throwaway worktree, an abort leaves the caller's tree untouched.
+//
+// It is a THIN wrapper around DispatchModel (reused VERBATIM): it creates a fresh
+// worktree branched off the workdir repo's HEAD, runs the whole author+review+
+// verify pipeline there, and then either commits the result onto a returned
+// branch (on success WITH changes) or discards it entirely (on failure / no
+// changes). jindo does NOT auto-merge — on success the HOST merges the returned
+// branch (`git merge <branch>`), so the caller's tree is only ever modified by
+// that host-side merge, never by a half-finished dispatch.
+//
+// workdir MUST be inside a git repository (it anchors the worktree's HEAD); an
+// empty workdir or a non-repo workdir is refused with an error. All git plumbing
+// runs via exec.Command with -C (never a shell), mirroring changedfiles.go for
+// security parity.
+func (o *Orchestrator) DispatchIsolated(task, agentName, priority, model, guidance, effort string, review bool, verify []string, workdir string) (Result, error) {
+	if workdir == "" {
+		return Result{}, fmt.Errorf("isolate requires workdir to be inside a git repository")
+	}
+	repoRoot, err := gitCmd(workdir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return Result{}, fmt.Errorf("isolate requires workdir to be inside a git repository")
+	}
+
+	// Derive a unique, collision-free token from the dispatch store's key
+	// allocator (the same source dispatch keys come from), sanitized into a valid
+	// git ref/path component — a raw "task:<agent>:<n>" key contains ':', which is
+	// illegal in a git branch name.
+	mem := o.dispatchStore()
+	allocAgent := agentName
+	if allocAgent == "" {
+		allocAgent = "iso"
+	}
+	rawKey, err := mem.AllocKey(allocAgent)
+	if err != nil {
+		return Result{}, fmt.Errorf("isolate: alloc token: %w", err)
+	}
+	token := sanitizeToken(rawKey)
+	branch := "jindo/iso-" + token
+	worktreePath := filepath.Join(repoRoot, ".jindo", "wt", token)
+
+	// Create the worktree + throwaway branch off HEAD. On failure nothing has been
+	// created to clean up, so return the error directly.
+	if out, err := gitCmd(repoRoot, "worktree", "add", "-b", branch, worktreePath, "HEAD"); err != nil {
+		return Result{}, fmt.Errorf("isolate: worktree add: %w: %s", err, out)
+	}
+
+	// Run the REAL dispatch inside the worktree (DispatchModel reused verbatim).
+	res, derr := o.DispatchModel(task, agentName, priority, model, guidance, effort, review, verify, worktreePath)
+	if derr != nil {
+		// The dispatch itself errored (routing/adapter/policy): discard BOTH the
+		// worktree and the branch so the caller's tree stays pristine, then surface
+		// the error (mirroring the non-isolate propagation of a DispatchModel error).
+		o.discardWorktree(repoRoot, worktreePath, branch)
+		return Result{}, derr
+	}
+
+	// Success requires a non-error status and — when a verify gate ran — a passing
+	// gate: the same signal the host uses to decide whether to keep the work.
+	success := res.Status != "error" && (res.Verify == nil || res.Verify.Passed)
+
+	// "Has changes" is decided from the worktree's OWN git status (reusing
+	// gitStatusSnapshot's exec style); an empty snapshot means the sub-agent wrote
+	// nothing worth keeping.
+	snap, ok := gitStatusSnapshot(worktreePath)
+	hasChanges := ok && len(snap) > 0
+
+	if success && hasChanges {
+		// Commit the worktree's changes onto the branch, then REMOVE the worktree
+		// (the branch, carrying the commit, persists for the host to merge). A git
+		// plumbing failure here best-effort discards the worktree and returns the
+		// error so the caller sees isolate failed rather than a half state.
+		if out, err := gitCmd(worktreePath, "add", "-A"); err != nil {
+			o.discardWorktree(repoRoot, worktreePath, branch)
+			return Result{}, fmt.Errorf("isolate: git add: %w: %s", err, out)
+		}
+		if out, err := gitCmd(worktreePath, "-c", "user.email=jindo@local", "-c", "user.name=jindo",
+			"commit", "-m", "jindo isolate dispatch "+token); err != nil {
+			o.discardWorktree(repoRoot, worktreePath, branch)
+			return Result{}, fmt.Errorf("isolate: git commit: %w: %s", err, out)
+		}
+		if out, err := gitCmd(repoRoot, "worktree", "remove", "--force", worktreePath); err != nil {
+			// Best-effort: the commit is safe on the branch; a leftover worktree is
+			// diagnosable but is not a dispatch failure.
+			_ = mem.AppendNote("orchestrator", fmt.Sprintf("isolate: worktree remove failed for %s: %v: %s", worktreePath, err, out))
+		}
+		res.Isolation = &Isolation{Branch: branch, Committed: true, Merged: false}
+		return res, nil
+	}
+
+	// Failure or no changes: discard BOTH the worktree and the throwaway branch so
+	// the caller's tree stays pristine, and report that nothing was committed.
+	o.discardWorktree(repoRoot, worktreePath, branch)
+	res.Isolation = &Isolation{Committed: false, Merged: false}
+	return res, nil
+}
+
+// gitCmd runs a git subcommand in dir via exec.Command (never a shell, mirroring
+// changedfiles.go's exec style) and returns its trimmed combined output and any
+// error. Used only for DispatchIsolated's worktree plumbing.
+func gitCmd(dir string, args ...string) (string, error) {
+	c := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := c.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// sanitizeToken turns an allocated dispatch key (e.g. "task:claude:7") into a
+// component safe for a git branch name and worktree path by replacing every ':'
+// (illegal in a git ref) with '-'.
+func sanitizeToken(key string) string {
+	return strings.ReplaceAll(key, ":", "-")
+}
+
+// discardWorktree best-effort removes the ephemeral worktree AND deletes the
+// throwaway branch, leaving the caller's repo as if the isolate dispatch never
+// ran. Failures are recorded as best-effort notes and never returned, since this
+// is the cleanup path.
+func (o *Orchestrator) discardWorktree(repoRoot, worktreePath, branch string) {
+	if out, err := gitCmd(repoRoot, "worktree", "remove", "--force", worktreePath); err != nil {
+		_ = o.dispatchStore().AppendNote("orchestrator", fmt.Sprintf("isolate: worktree remove failed for %s: %v: %s", worktreePath, err, out))
+	}
+	if out, err := gitCmd(repoRoot, "branch", "-D", branch); err != nil {
+		_ = o.dispatchStore().AppendNote("orchestrator", fmt.Sprintf("isolate: branch delete failed for %s: %v: %s", branch, err, out))
+	}
 }
 
 // PlanResult is the outcome of a Plan: the agent+model that produced the plan,
