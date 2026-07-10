@@ -10,9 +10,12 @@
 //   - Persistence is best-effort-robust: a corrupt or absent plan.json makes
 //     Load report ok=false rather than panicking, and a write failure surfaces as
 //     the operation's error without corrupting the in-memory intent.
-//   - A step is runnable only when it is pending AND every id in its DependsOn is
-//     done; Next returns steps in slice order, so the plan's authored order is
-//     the execution order among otherwise-runnable steps.
+//   - A step is runnable when it is pending, or failed but still under the
+//     MaxAttempts retry cap, AND every id in its DependsOn is done; Next returns
+//     steps in slice order, so the plan's authored order is the execution order
+//     among otherwise-runnable steps. Re-offering a failed step until MaxAttempts
+//     makes the loop self-healing: a transient failure is retried instead of
+//     permanently blocking the plan.
 package plan
 
 import (
@@ -31,6 +34,12 @@ const (
 	StatusDone    = "done"
 	StatusFailed  = "failed"
 )
+
+// MaxAttempts caps how many times a failed step is retried before it is
+// terminally blocked: a failed step is re-offered by Next until it has been
+// attempted MaxAttempts times, after which it is no longer runnable. It is a
+// var (not a const) so tests can tighten it.
+var MaxAttempts = 3
 
 // Step is one node of the active plan. It mirrors agentproto.PlanStep's authored
 // fields (id/title/prompt/difficulty/suggested_model/suggested_verify/depends_on)
@@ -121,11 +130,18 @@ func (m *Manager) Load() (State, bool) {
 	return m.read()
 }
 
-// Next returns the FIRST pending step (in slice order) whose every DependsOn id
-// is done, the count of pending steps remaining, and whether a runnable step was
-// found. A step blocked only by unmet dependencies is skipped, not returned: if
-// pending steps remain but none are runnable, ok is false while remaining>0, so
-// the caller can distinguish "plan blocked" from "plan complete" (remaining 0).
+// Next returns the FIRST runnable step (in slice order) whose every DependsOn id
+// is done, the count of not-yet-done steps remaining, and whether a runnable
+// step was found. A step is runnable when it is pending, or failed but still
+// under MaxAttempts, so Next re-offers a failed step — the self-healing retry
+// path — until its attempts reach MaxAttempts, after which it is terminally
+// blocked. Only a done dependency counts as satisfied: a retryable failed dep is
+// NOT done, so its dependents correctly wait. remaining counts every step whose
+// Status != done (pending + retryable-failed + blocked + dep-blocked), so
+// remaining==0 means every step is done; step==null with remaining>0 means the
+// only not-done steps are blocked (a failed step that hit MaxAttempts) or waiting
+// on such a blocked dependency, letting the caller distinguish "plan blocked"
+// from "plan complete".
 func (m *Manager) Next() (Step, int, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -141,14 +157,13 @@ func (m *Manager) Next() (Step, int, bool) {
 	for _, s := range st.Steps {
 		if s.Status == StatusDone {
 			done[s.ID] = true
-		}
-		if s.Status == StatusPending {
+		} else {
 			remaining++
 		}
 	}
 
 	for _, s := range st.Steps {
-		if s.Status != StatusPending {
+		if !runnable(s) {
 			continue
 		}
 		if depsMet(s.DependsOn, done) {
@@ -156,6 +171,14 @@ func (m *Manager) Next() (Step, int, bool) {
 		}
 	}
 	return Step{}, remaining, false
+}
+
+// runnable reports whether a step is eligible to be offered by Next: a pending
+// step, or a failed step still under the MaxAttempts cap. A failed-but-under-cap
+// step is still runnable — this is the retry path that makes the loop
+// self-healing rather than deadlocking on the first failure.
+func runnable(s Step) bool {
+	return s.Status == StatusPending || (s.Status == StatusFailed && s.Attempts < MaxAttempts)
 }
 
 // depsMet reports whether every id in deps is a done step.
@@ -170,8 +193,10 @@ func depsMet(deps []string, done map[string]bool) bool {
 
 // Record sets the step's Status (done/failed) and Note and persists the plan. A
 // failed record increments Attempts (a done one does not), so the loop can see
-// how many times a step was tried. An unknown id is an error and nothing is
-// written. Returns the updated step.
+// how many times a step was tried. A failed step stays runnable — re-offered by
+// Next — until Attempts reaches MaxAttempts, after which it is terminally
+// blocked. An unknown id is an error and nothing is written. Returns the updated
+// step.
 func (m *Manager) Record(id, status, note string) (Step, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

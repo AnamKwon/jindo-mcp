@@ -454,7 +454,7 @@ func tools() []toolDef {
 		},
 		{
 			Name:        "plan_next",
-			Description: "Return the next runnable step of the active plan (the first pending step in order whose depends_on are all done) plus the count of pending steps remaining. Response {step, remaining}: step is null when no step is runnable — if remaining>0 the plan is blocked on unmet dependencies, if remaining==0 the plan is complete. HOST LOOP: after plan establishes the plan, call plan_next, dispatch the returned step's prompt (review=true, at its suggested_model, gated by its suggested_verify), then plan_record its outcome and call plan_next again until step is null and remaining is 0. When step is null and remaining is 0, call plan_gate to decide whether the loop may terminate (it runs the integration verify_cmds and a goal-met judge).",
+			Description: "Return the next runnable step of the active plan (the first step in order whose depends_on are all done and that is pending OR failed but still under its retry cap) plus the count of not-yet-done steps remaining. A failed step is re-offered automatically until it exhausts MaxAttempts, so a transient failure self-heals instead of blocking the loop. Response {step, remaining}: step is null when no step is runnable — if remaining>0 the plan is BLOCKED (a failed step hit its attempt cap, or a dependent is waiting on such a blocked step); the host should replan around it (plan_revise) or call plan_gate. If remaining==0 the plan is complete. HOST LOOP: after plan establishes the plan, call plan_next, dispatch the returned step's prompt (review=true, at its suggested_model, gated by its suggested_verify), then plan_record its outcome and call plan_next again until step is null and remaining is 0. When step is null and remaining is 0, call plan_gate to decide whether the loop may terminate (it runs the integration verify_cmds and a goal-met judge).",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},
@@ -462,7 +462,7 @@ func tools() []toolDef {
 		},
 		{
 			Name:        "plan_record",
-			Description: "Record the outcome of a plan step: set its status to \"done\" or \"failed\" (a failed record increments the step's attempt count) with an optional note. Returns the updated step and the count of pending steps remaining. An unknown step_id is invalid-params. Call after dispatching a step's prompt, then call plan_next for the next step.",
+			Description: "Record the outcome of a plan step: set its status to \"done\" or \"failed\" (a failed record increments the step's attempt count) with an optional note. Recording \"failed\" does NOT permanently block the step: it will be retried automatically — re-offered by plan_next — until it exhausts its attempt cap, at which point it becomes terminally blocked. So record \"failed\" with the concrete failure signal in note, and on the retry change the approach using that signal. Returns the updated step and the count of not-yet-done steps remaining. An unknown step_id is invalid-params. Call after dispatching a step's prompt, then call plan_next for the next step.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -495,7 +495,7 @@ func tools() []toolDef {
 		},
 		{
 			Name:        "plan_gate",
-			Description: "The autonomous loop's stop gate: runs the active plan's integration verify_cmds in workdir AND a read-only goal-met judge, returning {steps_remaining, verify, goal_met, goal_met_reason, can_stop}. Call after plan_next reports no runnable steps (remaining 0) to decide whether the loop may terminate; can_stop is true only when no steps remain AND verify passed AND the goal is judged met.",
+			Description: "The autonomous loop's stop gate: runs the active plan's integration verify_cmds in workdir AND a read-only goal-met judge, returning {steps_remaining, verify, goal_met, goal_met_reason, can_stop}. Call after plan_next reports no runnable steps (remaining 0) to decide whether the loop may terminate; can_stop is true only when no steps remain AND verify passed AND the goal is judged met. can_stop stays false while any step is not done — including a retryable or terminally-blocked failed step — so a blocked essential step keeps the loop from stopping.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -827,10 +827,11 @@ func (s *Server) callPlan(req *Request, args json.RawMessage) Response {
 }
 
 // callPlanNext runs the plan_next tool: return the next runnable step of the
-// active plan (first pending step whose depends_on are all done, in order) plus
-// the count of pending steps remaining. step is null when nothing is runnable —
-// remaining>0 then means the plan is blocked on unmet deps, remaining==0 means
-// it is complete.
+// active plan (first step whose depends_on are all done and is pending or
+// failed-but-under-cap, in order) plus the count of not-yet-done steps
+// remaining. step is null when nothing is runnable — remaining>0 then means the
+// plan is blocked (a failed step hit its attempt cap, or a dependent waits on
+// such a step), remaining==0 means it is complete.
 func (s *Server) callPlanNext(req *Request) Response {
 	step, remaining, ok := s.plan.Next()
 	if !ok {

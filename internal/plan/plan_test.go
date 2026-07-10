@@ -108,6 +108,75 @@ func TestNextAllDone(t *testing.T) {
 	}
 }
 
+// setMaxAttempts overrides the package attempt cap for the duration of a test,
+// restoring the prior value on cleanup so retry tests stay fast and isolated.
+func setMaxAttempts(t *testing.T, n int) {
+	t.Helper()
+	prev := MaxAttempts
+	MaxAttempts = n
+	t.Cleanup(func() { MaxAttempts = prev })
+}
+
+func TestNextReoffersFailedUnderCap(t *testing.T) {
+	setMaxAttempts(t, 2)
+	m := NewManager(t.TempDir())
+	if err := m.Save("g", twoStep()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// s1 fails once; under the cap (attempts 1 < 2) it must be re-offered.
+	if _, err := m.Record("s1", StatusFailed, "boom"); err != nil {
+		t.Fatalf("Record s1 failed: %v", err)
+	}
+	step, remaining, ok := m.Next()
+	if !ok || step.ID != "s1" {
+		t.Fatalf("Next after 1 failure = (%q,%v), want s1 re-offered", step.ID, ok)
+	}
+	if remaining != 2 {
+		t.Errorf("remaining = %d, want 2 (neither step done)", remaining)
+	}
+}
+
+func TestNextBlocksFailedAtCap(t *testing.T) {
+	setMaxAttempts(t, 2)
+	m := NewManager(t.TempDir())
+	if err := m.Save("g", twoStep()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// Fail s1 up to the cap; it is then terminally blocked, no longer offered.
+	for i := 0; i < 2; i++ {
+		if _, err := m.Record("s1", StatusFailed, "boom"); err != nil {
+			t.Fatalf("Record s1 failed: %v", err)
+		}
+	}
+	step, remaining, ok := m.Next()
+	if ok {
+		t.Fatalf("Next = %q runnable, want blocked (s1 hit cap, s2 waits on s1)", step.ID)
+	}
+	if remaining != 2 {
+		t.Errorf("remaining = %d, want 2 (blocked, not complete)", remaining)
+	}
+}
+
+func TestNextGatesDependentOnRetryableDep(t *testing.T) {
+	setMaxAttempts(t, 3)
+	m := NewManager(t.TempDir())
+	if err := m.Save("g", twoStep()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// s1 failed but retryable: it is re-offered, but s2 (depends_on s1) must NOT
+	// be — a retryable failed dep is not done, so dependents keep waiting.
+	if _, err := m.Record("s1", StatusFailed, "boom"); err != nil {
+		t.Fatalf("Record s1 failed: %v", err)
+	}
+	step, _, ok := m.Next()
+	if !ok || step.ID != "s1" {
+		t.Fatalf("Next = (%q,%v), want s1 (retryable), never s2", step.ID, ok)
+	}
+}
+
 func TestRecordDoneFailedAttempts(t *testing.T) {
 	m := NewManager(t.TempDir())
 	if err := m.Save("g", twoStep()); err != nil {
