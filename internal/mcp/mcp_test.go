@@ -126,8 +126,8 @@ func TestToolsList(t *testing.T) {
 	if !ok {
 		t.Fatalf("tools missing/wrong type: %v", m["tools"])
 	}
-	if len(toolsRaw) != 14 {
-		t.Fatalf("tools length = %d, want 14", len(toolsRaw))
+	if len(toolsRaw) != 15 {
+		t.Fatalf("tools length = %d, want 15", len(toolsRaw))
 	}
 	got := make([]string, 0, 9)
 	for _, tr := range toolsRaw {
@@ -142,7 +142,7 @@ func TestToolsList(t *testing.T) {
 		}
 	}
 	sort.Strings(got)
-	want := []string{"agents", "calibrate", "compact", "dispatch", "dispatch_async", "dispatch_multi", "job_status", "memory", "plan", "plan_gate", "plan_next", "plan_record", "plan_revise", "plan_status"}
+	want := []string{"agents", "calibrate", "compact", "dispatch", "dispatch_async", "dispatch_multi", "dispatch_multi_async", "job_status", "memory", "plan", "plan_gate", "plan_next", "plan_record", "plan_revise", "plan_status"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("tool names = %v, want %v", got, want)
 	}
@@ -1361,6 +1361,72 @@ func TestToolsCallDispatchMultiMissingModels(t *testing.T) {
 		}
 		if resp.Error.Code != codeInvalidParams {
 			t.Fatalf("dispatch_multi(%s) error code = %d, want %d", args, resp.Error.Code, codeInvalidParams)
+		}
+	}
+}
+
+// TestToolsCallDispatchMultiAsyncReturnsJobId verifies dispatch_multi_async
+// returns a job_id and status "running" immediately, without waiting for the
+// background fan-out to finish.
+func TestToolsCallDispatchMultiAsyncReturnsJobId(t *testing.T) {
+	canned := `{"status":"ok","result":"candidate answer","summary":"s","memory_updates":[]}`
+	s, _ := newTestServer(t, canned)
+	resp := call(t, s,
+		`{"jsonrpc":"2.0","id":62,"method":"tools/call","params":{"name":"dispatch_multi_async","arguments":{"task":"solve this","models":["claude-opus-4-8","gpt-5.5"]}}}`)
+	if resp.Error != nil {
+		t.Fatalf("dispatch_multi_async returned error: %+v", resp.Error)
+	}
+	var res struct {
+		JobID  string `json:"job_id"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(contentText(t, resp)), &res); err != nil {
+		t.Fatalf("dispatch_multi_async content not JSON: %v", err)
+	}
+	if res.JobID == "" {
+		t.Fatalf("dispatch_multi_async missing job_id: %s", contentText(t, resp))
+	}
+	if res.Status != "running" {
+		t.Fatalf("dispatch_multi_async status = %q, want running", res.Status)
+	}
+
+	// Drain the background job before returning: t.TempDir()'s cleanup
+	// races the goroutine's best-effort persist write otherwise (see
+	// internal/jobs.Manager.Submit). Long-polling job_status until
+	// terminal makes the wait deterministic without weakening the
+	// immediate-running assertion above.
+	statusReq := `{"jsonrpc":"2.0","id":63,"method":"tools/call","params":{"name":"job_status","arguments":{"job_id":"` + res.JobID + `","wait_sec":5}}}`
+	statusResp := call(t, s, statusReq)
+	if statusResp.Error != nil {
+		t.Fatalf("job_status returned error: %+v", statusResp.Error)
+	}
+	var status struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(contentText(t, statusResp)), &status); err != nil {
+		t.Fatalf("job_status content not JSON: %v", err)
+	}
+	if status.Status != "done" {
+		t.Fatalf("job_status status = %q, want done", status.Status)
+	}
+}
+
+// TestToolsCallDispatchMultiAsyncMissingModels verifies task without models
+// (and an empty models list) is rejected at submit time as invalid-params,
+// same as the sync dispatch_multi tool.
+func TestToolsCallDispatchMultiAsyncMissingModels(t *testing.T) {
+	s, _ := newTestServer(t, "canned")
+	for _, args := range []string{
+		`{"task":"solve this"}`,
+		`{"task":"solve this","models":[]}`,
+	} {
+		resp := call(t, s,
+			`{"jsonrpc":"2.0","id":64,"method":"tools/call","params":{"name":"dispatch_multi_async","arguments":`+args+`}}`)
+		if resp.Error == nil {
+			t.Fatalf("dispatch_multi_async(%s) error = nil, want invalid-params", args)
+		}
+		if resp.Error.Code != codeInvalidParams {
+			t.Fatalf("dispatch_multi_async(%s) error code = %d, want %d", args, resp.Error.Code, codeInvalidParams)
 		}
 	}
 }

@@ -410,7 +410,26 @@ func tools() []toolDef {
 		},
 		{
 			Name:        "dispatch_multi",
-			Description: "Fan a task out to multiple models concurrently in read-only \"propose\" mode: each model returns its OWN complete candidate solution (no files are written, so the candidates never clobber each other). Returns each model's candidate; with synthesis=\"judge\" it also returns a jindo-synthesized answer merging the candidates. This is the general collaboration primitive for coding AND non-coding tasks; the host decides when to use it versus single dispatch and normally synthesizes the candidates itself.",
+			Description: "Fan a task out to multiple models concurrently in read-only \"propose\" mode: each model returns its OWN complete candidate solution (no files are written, so the candidates never clobber each other). Returns each model's candidate; with synthesis=\"judge\" it also returns a jindo-synthesized answer merging the candidates. This is the general collaboration primitive for coding AND non-coding tasks; the host decides when to use it versus single dispatch and normally synthesizes the candidates itself. For a slow/large fan-out (many models and/or synthesis=\"judge\"), prefer dispatch_multi_async instead, since this synchronous call can exceed the host's MCP idle timeout.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"task":     map[string]any{"type": "string", "description": "The task or question to fan out to every model."},
+					"models":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "The exact model ids to run concurrently (e.g. [\"claude-opus-4-8\", \"gpt-5.5\"]). Each runs read-only and the agent is inferred from the model id."},
+					"guidance": map[string]any{"type": "string", "description": "Optional task-specific guidance injected into every candidate's system prompt for THIS task. Omit for the default generic contract."},
+					"synthesis": map[string]any{
+						"type":        "string",
+						"description": "Optional synthesis mode: \"none\" (default) returns only the raw candidates; \"judge\" additionally runs a judge model that merges them into one synthesized answer.",
+					},
+					"judge_model": map[string]any{"type": "string", "description": "Optional exact model id for the judge when synthesis=\"judge\". Omit to default to a strong judge model."},
+				},
+				"required": []string{"task", "models"},
+			},
+		},
+		{
+			Name: "dispatch_multi_async",
+			Description: "Async variant of dispatch_multi: fan a task out to multiple models concurrently in read-only \"propose\" mode and return immediately with a job_id instead of waiting for every candidate (and optional judge synthesis) to finish. A multi-model fan-out plus a judge can take minutes, and a synchronous dispatch_multi call can exceed the host's MCP idle timeout; use this variant for slow/large fan-outs instead. The done job result carries the same {candidates, synthesis?} payload dispatch_multi returns. " +
+				"POLLING CONTRACT: after calling this you MUST poll job_status with the returned job_id until its status is 'done' (or 'error') before proceeding; do NOT treat a 'running' status as a result.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -585,6 +604,8 @@ func (s *Server) toolsCall(req *Request) Response {
 		return s.callDispatchAsync(req, p.Arguments)
 	case "dispatch_multi":
 		return s.callDispatchMulti(req, p.Arguments)
+	case "dispatch_multi_async":
+		return s.callDispatchMultiAsync(req, p.Arguments)
 	case "job_status":
 		return s.callJobStatus(req, p.Arguments)
 	case "plan":
@@ -700,31 +721,24 @@ func (s *Server) callDispatch(req *Request, args json.RawMessage) Response {
 	return textResult(req.ID, payload)
 }
 
-// callDispatchMulti runs the dispatch_multi tool: decode {task, models,
-// guidance?, synthesis?, judge_model?}, fan the task out to every model in
-// read-only propose mode via the orchestrator, and return the candidates (plus
-// an optional judge synthesis) as a JSON text content block. task and a
-// non-empty models list are required (else invalid-params).
-func (s *Server) callDispatchMulti(req *Request, args json.RawMessage) Response {
-	var in struct {
-		Task       string   `json:"task"`
-		Models     []string `json:"models"`
-		Guidance   string   `json:"guidance"`
-		Synthesis  string   `json:"synthesis"`
-		JudgeModel string   `json:"judge_model"`
-	}
-	if err := decodeArgs(args, &in); err != nil {
-		return errorResponse(req.ID, codeInvalidParams, "invalid params: "+err.Error())
-	}
-	if in.Task == "" {
-		return errorResponse(req.ID, codeInvalidParams, "invalid params: task is required")
-	}
-	if len(in.Models) == 0 {
-		return errorResponse(req.ID, codeInvalidParams, "invalid params: models is required and must be non-empty")
-	}
-	res, err := s.o.DispatchMulti(in.Task, in.Models, in.Guidance, in.Synthesis, in.JudgeModel)
+// multiArgs is the decoded {task, models, guidance?, synthesis?, judge_model?}
+// argument shape shared by the sync "dispatch_multi" and async
+// "dispatch_multi_async" tools.
+type multiArgs struct {
+	Task       string   `json:"task"`
+	Models     []string `json:"models"`
+	Guidance   string   `json:"guidance"`
+	Synthesis  string   `json:"synthesis"`
+	JudgeModel string   `json:"judge_model"`
+}
+
+// runDispatchMulti fans the task out to every model in read-only propose mode
+// via the orchestrator and builds the JSON-able payload map both the sync and
+// async tools return on success.
+func runDispatchMulti(o *orchestrator.Orchestrator, in multiArgs) (map[string]any, error) {
+	res, err := o.DispatchMulti(in.Task, in.Models, in.Guidance, in.Synthesis, in.JudgeModel)
 	if err != nil {
-		return errorResponse(req.ID, codeInternalError, "dispatch_multi failed: "+err.Error())
+		return nil, err
 	}
 	candidates := make([]map[string]any, len(res.Candidates))
 	for i, c := range res.Candidates {
@@ -743,7 +757,55 @@ func (s *Server) callDispatchMulti(req *Request, args json.RawMessage) Response 
 			"result": res.Synthesis.Result,
 		}
 	}
+	return payload, nil
+}
+
+// callDispatchMulti runs the dispatch_multi tool: decode {task, models,
+// guidance?, synthesis?, judge_model?}, fan the task out to every model in
+// read-only propose mode via the orchestrator, and return the candidates (plus
+// an optional judge synthesis) as a JSON text content block. task and a
+// non-empty models list are required (else invalid-params).
+func (s *Server) callDispatchMulti(req *Request, args json.RawMessage) Response {
+	var in multiArgs
+	if err := decodeArgs(args, &in); err != nil {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: "+err.Error())
+	}
+	if in.Task == "" {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: task is required")
+	}
+	if len(in.Models) == 0 {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: models is required and must be non-empty")
+	}
+	payload, err := runDispatchMulti(s.o, in)
+	if err != nil {
+		return errorResponse(req.ID, codeInternalError, "dispatch_multi failed: "+err.Error())
+	}
 	return textResult(req.ID, payload)
+}
+
+// callDispatchMultiAsync runs the dispatch_multi_async tool: decode the same
+// {task, models, guidance?, synthesis?, judge_model?} shape as dispatch_multi,
+// submit it to the job manager to run in the background, and return
+// {job_id, status:"running"} immediately. The caller is expected to poll
+// job_status with the returned id.
+func (s *Server) callDispatchMultiAsync(req *Request, args json.RawMessage) Response {
+	var in multiArgs
+	if err := decodeArgs(args, &in); err != nil {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: "+err.Error())
+	}
+	if in.Task == "" {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: task is required")
+	}
+	if len(in.Models) == 0 {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: models is required and must be non-empty")
+	}
+	id := s.jobs.Submit(func() (map[string]any, error) {
+		return runDispatchMulti(s.o, in)
+	})
+	return textResult(req.ID, map[string]any{
+		"job_id": id,
+		"status": jobs.StatusRunning,
+	})
 }
 
 // callDispatchAsync runs the dispatch_async tool: decode the same
