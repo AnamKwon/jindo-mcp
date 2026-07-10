@@ -443,6 +443,12 @@ type PlanResult struct {
 	Steps   []agentproto.PlanStep
 	Summary string
 	Key     string
+	// Spec is the caller-provided clarified intent anchoring the plan (carried
+	// through so the caller can persist it); empty when none was supplied.
+	Spec string
+	// VerifyCmds is the planner-produced INTEGRATION gate for the whole goal
+	// (distinct from each step's suggested_verify, which gates only that step).
+	VerifyCmds []string
 }
 
 // planDirective is the short positional prompt handed to the planner adapter;
@@ -471,7 +477,7 @@ const planDirective = "Produce the step plan described in your instructions and 
 // memory write fails, but a persist failure is surfaced as a best-effort note
 // and leaves Key empty. A planner run that produces no parseable plan is a hard
 // error (nothing useful to return).
-func (o *Orchestrator) Plan(goal, agent, model string) (PlanResult, error) {
+func (o *Orchestrator) Plan(goal, spec, agent, model string) (PlanResult, error) {
 	// Resolve agent+model. A pinned model wins as-is; otherwise derive the
 	// agent's hard-tier model (defaulting the agent to claude). If the agent has
 	// no hard slot the model stays empty and the adapter routes to its default —
@@ -510,12 +516,12 @@ func (o *Orchestrator) Plan(goal, agent, model string) (PlanResult, error) {
 		return PlanResult{}, fmt.Errorf("orchestrator: planner %q run failed: %w", agent, err)
 	}
 
-	steps, summary, ok := agentproto.ParsePlanResponse(stdout)
+	steps, summary, verifyCmds, ok := agentproto.ParsePlanResponse(stdout)
 	if !ok {
 		return PlanResult{}, fmt.Errorf("orchestrator: planner produced no parseable plan")
 	}
 
-	res := PlanResult{Agent: agent, Model: model, Steps: steps, Summary: summary}
+	res := PlanResult{Agent: agent, Model: model, Steps: steps, Summary: summary, Spec: spec, VerifyCmds: verifyCmds}
 
 	// Persist the plan under an agent-owned, collision-free key so later
 	// dispatches can read it. Best-effort: a persist failure still returns the

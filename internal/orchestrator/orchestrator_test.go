@@ -2285,7 +2285,7 @@ func TestPlanDefaultsToClaudeHardModelAndPersists(t *testing.T) {
 		return cap, nil
 	}
 
-	res, err := o.Plan("add a plan MCP tool", "", "")
+	res, err := o.Plan("add a plan MCP tool", "", "", "")
 	if err != nil {
 		t.Fatalf("Plan error: %v", err)
 	}
@@ -2342,7 +2342,7 @@ func TestPlanPinsExplicitModel(t *testing.T) {
 	cap := &captureAdapter{name: "claude", canned: cannedPlanJSON}
 	o.GetAdapter = func(name string) (agent.Adapter, error) { return cap, nil }
 
-	res, err := o.Plan("small goal", "claude", pinned)
+	res, err := o.Plan("small goal", "", "claude", pinned)
 	if err != nil {
 		t.Fatalf("Plan error: %v", err)
 	}
@@ -2364,7 +2364,7 @@ func TestPlanUnparseableIsError(t *testing.T) {
 	cap := &captureAdapter{name: "claude", canned: "I could not produce a plan."}
 	o.GetAdapter = func(name string) (agent.Adapter, error) { return cap, nil }
 
-	if _, err := o.Plan("goal", "", ""); err == nil {
+	if _, err := o.Plan("goal", "", "", ""); err == nil {
 		t.Fatalf("Plan with unparseable planner output returned nil error, want error")
 	}
 }

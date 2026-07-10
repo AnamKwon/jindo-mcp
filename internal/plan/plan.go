@@ -50,12 +50,20 @@ type Step struct {
 	Note            string   `json:"note,omitempty"`
 }
 
-// State is the whole active plan: the goal it decomposes, its ordered steps, and
-// when it was established. It is exactly what plan.json holds.
+// State is the whole active plan: the goal it decomposes, the caller's clarified
+// intent (Spec) anchoring re-plans, the integration gate proving the whole goal
+// (VerifyCmds), its ordered steps, and when it was established. It is exactly
+// what plan.json holds.
 type State struct {
-	Goal      string    `json:"goal"`
-	Steps     []Step    `json:"steps"`
-	CreatedAt time.Time `json:"created_at"`
+	Goal string `json:"goal"`
+	// Spec is the caller-provided clarified intent anchoring re-plans; empty
+	// when none was supplied.
+	Spec string `json:"spec,omitempty"`
+	// VerifyCmds is the integration gate for the WHOLE goal (distinct from each
+	// step's SuggestedVerify, which gates only that step).
+	VerifyCmds []string  `json:"verify_cmds,omitempty"`
+	Steps      []Step    `json:"steps"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // Manager guards the single active plan under a root directory. The zero value
@@ -82,6 +90,14 @@ func (m *Manager) planPath() string {
 // plan.json. Steps with no Status are defaulted to pending; a caller may preset
 // a status (e.g. to seed an already-partly-done plan). Callers do not hold m.mu.
 func (m *Manager) Save(goal string, steps []Step) error {
+	return m.SaveWith(goal, "", nil, steps)
+}
+
+// SaveWith is Save plus the caller's clarified intent (spec) and the plan's
+// integration gate (verifyCmds), persisting both on the active plan state. Steps
+// with no Status are defaulted to pending; a caller may preset a status (e.g. to
+// seed an already-partly-done plan). Callers do not hold m.mu.
+func (m *Manager) SaveWith(goal, spec string, verifyCmds []string, steps []Step) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -92,7 +108,7 @@ func (m *Manager) Save(goal string, steps []Step) error {
 			norm[i].Status = StatusPending
 		}
 	}
-	st := State{Goal: goal, Steps: norm, CreatedAt: time.Now()}
+	st := State{Goal: goal, Spec: spec, VerifyCmds: verifyCmds, Steps: norm, CreatedAt: time.Now()}
 	return m.write(st)
 }
 
@@ -275,7 +291,39 @@ func (m *Manager) write(st State) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(m.planPath(), buf, 0o644)
+	// Write to a temp file, flush to stable storage, then rename onto plan.json
+	// so a crash mid-write can never leave a truncated file that read() would
+	// treat as "no active plan" (silently losing the step loop's durable state).
+	// Mirrors memory.save's temp+Sync+Rename discipline.
+	tmp, err := os.CreateTemp(m.root, "plan-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(buf); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, m.planPath()); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 // read loads plan.json. A missing or corrupt file reports ok=false. Callers

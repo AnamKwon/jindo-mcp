@@ -1,11 +1,21 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+// DefaultTimeout bounds a single agent-CLI subprocess run. Without a deadline a
+// hung coding-agent CLI would block its dispatch — and therefore the MCP request
+// — forever, and leak sibling goroutines/processes in the concurrent fan-outs.
+// defaultExec applies it (via exec.CommandContext) whenever the adapter's own
+// Timeout is zero. The value is generous because a real coding-agent run can be
+// slow, but it is bounded.
+var DefaultTimeout = 10 * time.Minute
 
 // Adapter mirrors the Python AgentAdapter ABC.
 //
@@ -57,6 +67,13 @@ type cliAdapter struct {
 	// when set (via SetDir) defaultExec binds exec.Command's Dir to it so a
 	// per-dispatch workdir anchors the sub-agent's process cwd.
 	Dir string
+	// Timeout bounds a single defaultExec subprocess run. When zero (the
+	// default) defaultExec falls back to the package-level DefaultTimeout; a
+	// non-zero value overrides the deadline for this adapter. The bound ensures
+	// a hung CLI cannot block the dispatch/MCP request or leak fan-out
+	// goroutines. It is applied purely inside defaultExec (the same seam that
+	// binds Dir), so the Adapter Run/RunWith signatures are unchanged.
+	Timeout time.Duration
 	// Exec is a TEST OVERRIDE seam: when non-nil, execArgv calls it instead of
 	// defaultExec, so tests can capture the argv without spawning a process. The
 	// constructors leave it nil so production always runs the real subprocess.
@@ -150,7 +167,16 @@ func wrapExecErr(out []byte, err error) (string, error) {
 // directory to a.Dir when set (empty Dir inherits jindo's cwd, matching the
 // pre-workdir behavior).
 func (a *cliAdapter) defaultExec(argv []string) (string, error) {
-	cmd := exec.Command(argv[0], argv[1:]...)
+	// Bound the run with a deadline so a hung CLI cannot block the dispatch (and
+	// the MCP request) forever or leak sibling fan-out goroutines/processes;
+	// exec.CommandContext kills the process when the context expires.
+	timeout := a.Timeout
+	if timeout == 0 {
+		timeout = DefaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	if a.Dir != "" {
 		cmd.Dir = a.Dir
 	}

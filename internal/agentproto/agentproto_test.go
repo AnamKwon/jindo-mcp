@@ -414,7 +414,7 @@ Now the actual plan:
   "summary": "two-step plan"
 }`
 
-	steps, summary, ok := ParsePlanResponse(stdout)
+	steps, summary, _, ok := ParsePlanResponse(stdout)
 	if !ok {
 		t.Fatalf("ParsePlanResponse ok = false, want true")
 	}
@@ -442,7 +442,7 @@ func TestParsePlanResponse_Garbage(t *testing.T) {
 		`{"summary": "no steps array"}`,
 		`{"steps": [], "summary": "empty steps"}`,
 	} {
-		steps, summary, ok := ParsePlanResponse(stdout)
+		steps, summary, _, ok := ParsePlanResponse(stdout)
 		if ok {
 			t.Errorf("ParsePlanResponse(%q) ok = true, want false", stdout)
 		}

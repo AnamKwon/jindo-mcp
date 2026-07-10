@@ -341,7 +341,8 @@ type PlanStep struct {
 // PLANNER to (a) read the shared bounded memory under memoryDir (like the other
 // prompts), (b) decompose the GOAL into small, ordered, independently-verifiable
 // steps WITHOUT doing the work or editing files, and (c) terminate its output
-// with exactly one JSON block matching the plan contract {steps,summary}. The
+// with exactly one JSON block matching the plan contract {steps,summary,
+// verify_cmds}. The
 // schema is spelled out literally — mirroring BuildSystemPrompt — so the planner
 // emits output ParsePlanResponse can read.
 func BuildPlanPrompt(goal, memoryDir string) string {
@@ -388,6 +389,12 @@ func BuildPlanPrompt(goal, memoryDir string) string {
 	b.WriteString("    empty for steps with no prerequisites).\n")
 	b.WriteString("Give each step a short stable id (e.g. \"s1\", \"s2\") that later steps reference in\n")
 	b.WriteString("depends_on. Do NOT perform the steps and do NOT modify any files — only plan.\n\n")
+	b.WriteString("ALSO emit, in the SAME JSON block, a top-level \"verify_cmds\" array: the\n")
+	b.WriteString("INTEGRATION verification commands that prove the WHOLE goal is done, distinct\n")
+	b.WriteString("from each step's suggested_verify (which proves only that one step). Each entry\n")
+	b.WriteString("is an allowlisted command, ONE program with args, NO shell pipes/redirects or\n")
+	b.WriteString("other metacharacters. Choose commands that, if they all pass, demonstrate the\n")
+	b.WriteString("overall goal is complete (may be empty if none apply).\n\n")
 	b.WriteString("SECURITY-SENSITIVE STEPS.\n")
 	b.WriteString("If a step touches authentication, authorization, secrets, input handling, or\n")
 	b.WriteString("file/exec/network operations, flag it: prefix that step's title with\n")
@@ -410,7 +417,8 @@ func BuildPlanPrompt(goal, memoryDir string) string {
 	b.WriteString("      \"depends_on\":       [string]  // prerequisite step ids (may be empty)\n")
 	b.WriteString("    }\n")
 	b.WriteString("  ],\n")
-	b.WriteString("  \"summary\": string    // short overview of the overall plan\n")
+	b.WriteString("  \"summary\": string,   // short overview of the overall plan\n")
+	b.WriteString("  \"verify_cmds\": [string] // INTEGRATION verify commands proving the whole goal\n")
 	b.WriteString("}\n\n")
 	b.WriteString("Emit only ONE such JSON object and make it the final content of your output so\n")
 	b.WriteString("it can be parsed reliably. Code fences are optional, but the object must be\n")
@@ -518,21 +526,24 @@ func BuildJudgePrompt(memoryDir, task string, candidates []string) string {
 }
 
 // ParsePlanResponse extracts the last balanced top-level JSON object from
-// arbitrary planner stdout and unmarshals it into {steps,summary}, reusing the
-// same tolerant brace-depth scanner as ParseResponse (topLevelObjectSpans). It
-// prefers the LAST span that both unmarshals cleanly AND carries a non-empty
-// steps array, so an example object printed earlier in the prose — or an
-// unrelated {} — does not masquerade as the plan.
+// arbitrary planner stdout and unmarshals it into {steps,summary,verify_cmds},
+// reusing the same tolerant brace-depth scanner as ParseResponse
+// (topLevelObjectSpans). It prefers the LAST span that both unmarshals cleanly
+// AND carries a non-empty steps array, so an example object printed earlier in
+// the prose — or an unrelated {} — does not masquerade as the plan. verifyCmds
+// is the plan's INTEGRATION gate (proving the whole goal), distinct from each
+// step's suggested_verify.
 //
 // ok is false when no object with a non-empty steps array is found; in that case
-// steps is nil and summary is empty. It never panics.
-func ParsePlanResponse(stdout string) (steps []PlanStep, summary string, ok bool) {
+// steps is nil, summary is empty, and verifyCmds is nil. It never panics.
+func ParsePlanResponse(stdout string) (steps []PlanStep, summary string, verifyCmds []string, ok bool) {
 	spans := topLevelObjectSpans(stdout)
 
 	for i := len(spans) - 1; i >= 0; i-- {
 		var plan struct {
-			Steps   []PlanStep `json:"steps"`
-			Summary string     `json:"summary"`
+			Steps      []PlanStep `json:"steps"`
+			Summary    string     `json:"summary"`
+			VerifyCmds []string   `json:"verify_cmds"`
 		}
 		if err := json.Unmarshal([]byte(spans[i]), &plan); err != nil {
 			continue
@@ -542,10 +553,10 @@ func ParsePlanResponse(stdout string) (steps []PlanStep, summary string, ok bool
 		if len(plan.Steps) == 0 {
 			continue
 		}
-		return plan.Steps, plan.Summary, true
+		return plan.Steps, plan.Summary, plan.VerifyCmds, true
 	}
 
-	return nil, "", false
+	return nil, "", nil, false
 }
 
 // topLevelObjectSpans scans s and returns every complete balanced top-level

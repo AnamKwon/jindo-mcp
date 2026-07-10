@@ -16,8 +16,8 @@
 //
 // The Server holds the *orchestrator.Orchestrator it drives (for dispatch and,
 // via o.Mem, for the memory tool) and reads the static agent/model table from
-// the routing package. It carries no other state, so a single Server can serve
-// a stream sequentially.
+// the routing package. It carries no per-request mutable state, so a single
+// Server can serve a stream while handling its requests concurrently.
 package mcp
 
 import (
@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	"jindo/internal/calibrate"
@@ -107,41 +108,125 @@ func NewServer(o *orchestrator.Orchestrator) *Server {
 }
 
 // maxLineBytes bounds a single request line. MCP payloads (a task prompt, a
-// memory dump) can exceed bufio.Scanner's 64 KiB default, so the scan buffer is
-// grown to this ceiling.
+// memory dump) can be large, so the read buffer is sized to this ceiling; a
+// line exceeding it is refused with one parse error rather than consuming
+// unbounded memory or killing the connection.
 const maxLineBytes = 8 << 20 // 8 MiB
 
 // Serve reads newline-delimited JSON-RPC requests from r and writes one JSON
-// response line to w per request, until r is exhausted (io.EOF) or the scanner
-// errors. A blank line is skipped. A request with no id is a JSON-RPC
+// response line to w per request, until r is exhausted (io.EOF) or a read/write
+// error occurs. A blank line is skipped. A request with no id is a JSON-RPC
 // notification and draws no response, matching the spec (MCP clients send
 // notifications/initialized this way after handshake).
 //
-// Returns the scanner's error, if any; a clean EOF is reported as nil.
+// Each request is handled in its own goroutine so a long-polling job_status
+// (which blocks up to maxJobWaitSec) never stalls the reading or answering of
+// other requests on the stream. Responses carry their own id, so they may be
+// written in any order; all writes to w are serialized through a mutex so
+// response lines never interleave, and Serve waits for every in-flight handler
+// to finish (so no response is lost) before returning.
+//
+// A single line exceeding maxLineBytes does not kill the connection: it draws
+// one parse-error response and the rest of that line is discarded up to the
+// next '\n', after which serving continues. Returns the first read/write error;
+// a clean EOF is reported as nil.
 func (s *Server) Serve(r io.Reader, w io.Writer) error {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), maxLineBytes)
+	br := bufio.NewReaderSize(r, maxLineBytes)
 	bw := bufio.NewWriter(w)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		resp := s.HandleLine(line)
-		if resp == nil {
-			continue // notification: no response
+	var (
+		mu       sync.Mutex // serializes all writes to bw
+		wg       sync.WaitGroup
+		writeErr error // first write error, guarded by mu
+	)
+	// writeResp writes one response line and flushes it, under mu so concurrent
+	// handlers (and the oversized-line parse error) never interleave on the
+	// wire. The first write error is remembered and short-circuits later writes.
+	writeResp := func(resp []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		if writeErr != nil {
+			return
 		}
 		if _, err := bw.Write(resp); err != nil {
-			return err
+			writeErr = err
+			return
 		}
 		if err := bw.WriteByte('\n'); err != nil {
-			return err
+			writeErr = err
+			return
 		}
 		if err := bw.Flush(); err != nil {
-			return err
+			writeErr = err
 		}
 	}
-	return sc.Err()
+	for {
+		line, err := br.ReadSlice('\n')
+		if err == bufio.ErrBufferFull {
+			// Oversized line: the bounded read buffer refuses to grow past
+			// maxLineBytes. Emit one parse error and discard the remainder of
+			// the line up to the next '\n', then keep serving.
+			writeResp(mustMarshal(errorResponse(nullID, codeParseError, "parse error")))
+			derr := discardLine(br)
+			if derr == io.EOF {
+				break
+			}
+			if derr != nil {
+				wg.Wait()
+				return derr
+			}
+			continue
+		}
+		// Strip the trailing '\n' (absent only on a final unterminated line
+		// delivered together with io.EOF); skip a blank line exactly as before.
+		trimmed := line
+		if n := len(trimmed); n > 0 && trimmed[n-1] == '\n' {
+			trimmed = trimmed[:n-1]
+		}
+		if len(trimmed) > 0 {
+			// ReadSlice aliases the reader's buffer, overwritten by the next
+			// read, so copy before handing the line to the handler goroutine.
+			cp := make([]byte, len(trimmed))
+			copy(cp, trimmed)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if resp := s.HandleLine(cp); resp != nil {
+					writeResp(resp) // nil => notification: write nothing
+				}
+			}()
+		}
+		if err != nil {
+			wg.Wait()
+			if err == io.EOF {
+				return writeErr
+			}
+			return err
+		}
+		// Stop early if the writer has broken; no point reading further.
+		mu.Lock()
+		we := writeErr
+		mu.Unlock()
+		if we != nil {
+			wg.Wait()
+			return we
+		}
+	}
+	wg.Wait()
+	return writeErr
+}
+
+// discardLine consumes and discards bytes from br up to and including the next
+// '\n' (or EOF). It is used to drop the remainder of an oversized request line
+// so the server can recover and serve the next request. Returns nil once a
+// newline is consumed, or the terminating read error (io.EOF or worse).
+func discardLine(br *bufio.Reader) error {
+	for {
+		_, err := br.ReadSlice('\n')
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		return err
+	}
 }
 
 // HandleLine decodes one request line and returns the marshaled response bytes
@@ -149,7 +234,8 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 // draws no response. It never returns an error: a malformed line becomes a
 // parse-error response, and any marshaling failure of a normal response is
 // downgraded to a synthesized internal-error response so the transport loop
-// always has a well-formed line to write.
+// always has a well-formed line to write. It holds no per-request Server state,
+// so it is safe to call concurrently (Serve runs one call per goroutine).
 func (s *Server) HandleLine(line []byte) []byte {
 	var req Request
 	if err := json.Unmarshal(line, &req); err != nil {
@@ -354,11 +440,12 @@ func tools() []toolDef {
 		},
 		{
 			Name:        "plan",
-			Description: "Decompose a goal into an ordered step plan via a capable model AND establish it as the active, step-gated plan state. Returns steps, each with a per-step prompt (the concrete task to dispatch), difficulty, suggested_model, suggested_verify commands, and depends_on prerequisites; persists the plan to shared memory (under the returned key) and to the active plan state (all steps pending). Does NOT execute the steps. Drive the plan ONE step at a time: call plan_next to get the next runnable step, dispatch its prompt (with review=true, at its suggested_model, gated by its suggested_verify), then plan_record the outcome, and repeat; use plan_revise to adapt the remaining plan. The caller may pin the planning agent and/or the exact model; omit both to plan with the default agent's hard-tier model.",
+			Description: "Decompose a goal into an ordered step plan via a capable model AND establish it as the active, step-gated plan state. Returns steps, each with a per-step prompt (the concrete task to dispatch), difficulty, suggested_model, suggested_verify commands, and depends_on prerequisites, plus a plan-level verify_cmds (the INTEGRATION gate proving the whole goal is done, distinct from each step's suggested_verify) and the caller's spec echoed back; persists the plan to shared memory (under the returned key) and the full plan — including spec and verify_cmds — to the active plan state (all steps pending). Does NOT execute the steps. Drive the plan ONE step at a time: call plan_next to get the next runnable step, dispatch its prompt (with review=true, at its suggested_model, gated by its suggested_verify), then plan_record the outcome, and repeat; use plan_revise to adapt the remaining plan. The caller may pin the planning agent and/or the exact model; omit both to plan with the default agent's hard-tier model.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"goal":  map[string]any{"type": "string", "description": "The goal to decompose into an ordered step plan."},
+					"spec":  map[string]any{"type": "string", "description": "Optional clarified intent anchoring the plan (and later re-plans). Persisted on the active plan state and echoed back; omit if none."},
 					"agent": map[string]any{"type": "string", "description": "Optional agent to run the planner (e.g. \"claude\"). Omit to use the default planning agent."},
 					"model": map[string]any{"type": "string", "description": "Optional exact model id to run the planner. When set it is pinned; omit to use the chosen agent's hard-tier model (planning defaults to a strong model)."},
 				},
@@ -687,6 +774,7 @@ func (s *Server) callDispatchAsync(req *Request, args json.RawMessage) Response 
 func (s *Server) callPlan(req *Request, args json.RawMessage) Response {
 	var in struct {
 		Goal  string `json:"goal"`
+		Spec  string `json:"spec"`
 		Agent string `json:"agent"`
 		Model string `json:"model"`
 	}
@@ -696,7 +784,7 @@ func (s *Server) callPlan(req *Request, args json.RawMessage) Response {
 	if in.Goal == "" {
 		return errorResponse(req.ID, codeInvalidParams, "invalid params: goal is required")
 	}
-	res, err := s.o.Plan(in.Goal, in.Agent, in.Model)
+	res, err := s.o.Plan(in.Goal, in.Spec, in.Agent, in.Model)
 	if err != nil {
 		return errorResponse(req.ID, codeInternalError, "plan failed: "+err.Error())
 	}
@@ -712,14 +800,16 @@ func (s *Server) callPlan(req *Request, args json.RawMessage) Response {
 			Status: "pending",
 		})
 	}
-	_ = s.plan.Save(in.Goal, psteps)
+	_ = s.plan.SaveWith(in.Goal, res.Spec, res.VerifyCmds, psteps)
 	return textResult(req.ID, map[string]any{
-		"agent":   res.Agent,
-		"model":   res.Model,
-		"steps":   res.Steps,
-		"summary": res.Summary,
-		"key":     res.Key,
-		"note":    "Plan is now the active step-gated state (all pending). Drive it one step at a time: plan_next → dispatch the step's prompt (review=true, at suggested_model, gated by suggested_verify) → plan_record → repeat; plan_revise to adapt.",
+		"agent":       res.Agent,
+		"model":       res.Model,
+		"steps":       res.Steps,
+		"summary":     res.Summary,
+		"key":         res.Key,
+		"spec":        res.Spec,
+		"verify_cmds": res.VerifyCmds,
+		"note":        "Plan is now the active step-gated state (all pending). Drive it one step at a time: plan_next → dispatch the step's prompt (review=true, at suggested_model, gated by suggested_verify) → plan_record → repeat; plan_revise to adapt.",
 	})
 }
 

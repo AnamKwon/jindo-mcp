@@ -15,9 +15,11 @@ package orchestrator
 // os/exec directly (exec.Command), never a shell, stopping at the first failure.
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // verifyAllowlist is the set of program names (a verify command's FIRST token)
@@ -103,6 +105,12 @@ func ValidateVerifyCmds(cmds []string) error {
 	return nil
 }
 
+// verifyCmdTimeout bounds each individual verify command. Without a deadline a
+// hung test/build/lint would block the dispatch — and therefore the MCP request
+// — forever, and leak sibling goroutines/processes in the concurrent fan-outs.
+// A timed-out command is treated as a failure just like a non-zero exit.
+var verifyCmdTimeout = 10 * time.Minute
+
 // runVerify executes each vetted verify command sequentially in cwd, WITHOUT a
 // shell: the command is split into program + args and run via exec.Command with
 // its working directory set to cwd. Execution stops at the first command that
@@ -116,9 +124,16 @@ func runVerify(cwd string, cmds []string) VerifyResult {
 		if len(fields) == 0 {
 			continue
 		}
-		c := exec.Command(fields[0], fields[1:]...)
-		c.Dir = cwd
-		out, err := c.CombinedOutput()
+		// runOne bounds the command with a per-command deadline; the closure lets
+		// cancel() fire at the end of THIS iteration rather than stacking defers
+		// until runVerify returns.
+		out, err := func() ([]byte, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), verifyCmdTimeout)
+			defer cancel()
+			c := exec.CommandContext(ctx, fields[0], fields[1:]...)
+			c.Dir = cwd
+			return c.CombinedOutput()
+		}()
 		if err != nil {
 			res.Passed = false
 			res.FailedCmd = cmd
