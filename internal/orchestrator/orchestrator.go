@@ -485,22 +485,29 @@ func (o *Orchestrator) DispatchIsolated(task, agentName, priority, model, guidan
 		return Result{}, fmt.Errorf("isolate requires workdir to be inside a git repository")
 	}
 
-	// Derive a unique, collision-free token from the dispatch store's key
-	// allocator (the same source dispatch keys come from), sanitized into a valid
-	// git ref/path component — a raw "task:<agent>:<n>" key contains ':', which is
-	// illegal in a git branch name.
+	// Derive a unique worktree name WITHOUT persisting anything to the shared
+	// store: os.MkdirTemp reserves a collision-free directory under .jindo/wt.
+	// (Using the store's AllocKey here would write a reserved memory entry that
+	// the real dispatch's OWN key never reuses, leaking a phantom task:iso:N
+	// record on every isolate run.) MkdirTemp's suffix is filesystem- and
+	// git-ref-safe (letters+digits only), so the branch name needs no further
+	// sanitization.
 	mem := o.dispatchStore()
-	allocAgent := agentName
-	if allocAgent == "" {
-		allocAgent = "iso"
+	wtParent := filepath.Join(repoRoot, ".jindo", "wt")
+	if err := os.MkdirAll(wtParent, 0o755); err != nil {
+		return Result{}, fmt.Errorf("isolate: create worktree parent: %w", err)
 	}
-	rawKey, err := mem.AllocKey(allocAgent)
+	worktreePath, err := os.MkdirTemp(wtParent, "iso-")
 	if err != nil {
-		return Result{}, fmt.Errorf("isolate: alloc token: %w", err)
+		return Result{}, fmt.Errorf("isolate: reserve worktree name: %w", err)
 	}
-	token := sanitizeToken(rawKey)
-	branch := "jindo/iso-" + token
-	worktreePath := filepath.Join(repoRoot, ".jindo", "wt", token)
+	// git worktree add requires the target path NOT to exist yet; MkdirTemp
+	// created it only to reserve the unique name, so remove the empty dir first.
+	if err := os.Remove(worktreePath); err != nil {
+		return Result{}, fmt.Errorf("isolate: free reserved worktree name: %w", err)
+	}
+	token := filepath.Base(worktreePath)
+	branch := "jindo/" + token
 
 	// Create the worktree + throwaway branch off HEAD. On failure nothing has been
 	// created to clean up, so return the error directly.
@@ -570,9 +577,6 @@ func gitCmd(dir string, args ...string) (string, error) {
 // sanitizeToken turns an allocated dispatch key (e.g. "task:claude:7") into a
 // component safe for a git branch name and worktree path by replacing every ':'
 // (illegal in a git ref) with '-'.
-func sanitizeToken(key string) string {
-	return strings.ReplaceAll(key, ":", "-")
-}
 
 // discardWorktree best-effort removes the ephemeral worktree AND deletes the
 // throwaway branch, leaving the caller's repo as if the isolate dispatch never
