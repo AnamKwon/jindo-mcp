@@ -12,6 +12,7 @@ import (
 	"jindo/internal/agent"
 	"jindo/internal/memory"
 	"jindo/internal/orchestrator"
+	"jindo/internal/plan"
 	"jindo/internal/routing"
 	"jindo/internal/tmux"
 )
@@ -125,8 +126,8 @@ func TestToolsList(t *testing.T) {
 	if !ok {
 		t.Fatalf("tools missing/wrong type: %v", m["tools"])
 	}
-	if len(toolsRaw) != 13 {
-		t.Fatalf("tools length = %d, want 13", len(toolsRaw))
+	if len(toolsRaw) != 14 {
+		t.Fatalf("tools length = %d, want 14", len(toolsRaw))
 	}
 	got := make([]string, 0, 9)
 	for _, tr := range toolsRaw {
@@ -141,7 +142,7 @@ func TestToolsList(t *testing.T) {
 		}
 	}
 	sort.Strings(got)
-	want := []string{"agents", "calibrate", "compact", "dispatch", "dispatch_async", "dispatch_multi", "job_status", "memory", "plan", "plan_next", "plan_record", "plan_revise", "plan_status"}
+	want := []string{"agents", "calibrate", "compact", "dispatch", "dispatch_async", "dispatch_multi", "job_status", "memory", "plan", "plan_gate", "plan_next", "plan_record", "plan_revise", "plan_status"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("tool names = %v, want %v", got, want)
 	}
@@ -1361,5 +1362,155 @@ func TestToolsCallDispatchMultiMissingModels(t *testing.T) {
 		if resp.Error.Code != codeInvalidParams {
 			t.Fatalf("dispatch_multi(%s) error code = %d, want %d", args, resp.Error.Code, codeInvalidParams)
 		}
+	}
+}
+
+// planGatePayload mirrors orchestrator.GateResult for decoding the plan_gate
+// tool's JSON content.
+type planGatePayload struct {
+	StepsRemaining int  `json:"steps_remaining"`
+	Verify         struct {
+		Passed   bool     `json:"passed"`
+		Commands []string `json:"commands"`
+	} `json:"verify"`
+	GoalMet       bool   `json:"goal_met"`
+	GoalMetReason string `json:"goal_met_reason"`
+	CanStop       bool   `json:"can_stop"`
+}
+
+// TestToolsCallPlanGateNoActivePlan verifies plan_gate is invalid-params when
+// no plan has been established, mirroring plan_status's "no active plan" case.
+func TestToolsCallPlanGateNoActivePlan(t *testing.T) {
+	s, _ := newTestServer(t, "canned")
+	resp := call(t, s,
+		`{"jsonrpc":"2.0","id":70,"method":"tools/call","params":{"name":"plan_gate","arguments":{}}}`)
+	if resp.Error == nil {
+		t.Fatalf("plan_gate with no active plan: error = nil, want invalid-params")
+	}
+	if resp.Error.Code != codeInvalidParams {
+		t.Fatalf("plan_gate with no active plan: error code = %d, want %d", resp.Error.Code, codeInvalidParams)
+	}
+}
+
+// TestToolsCallPlanGateStepsRemainingBlocks seeds a plan with one still-pending
+// step and a judge that affirms goal_met, proving can_stop stays false while
+// steps remain even though verify and the judge both agree.
+func TestToolsCallPlanGateStepsRemainingBlocks(t *testing.T) {
+	canned := `{"goal_met": true, "reason": "looks done"}`
+	s, _ := newTestServer(t, canned)
+	if err := s.plan.SaveWith("build the thing", "", nil, []plan.Step{
+		{ID: "s1", Title: "do it", Status: plan.StatusPending},
+	}); err != nil {
+		t.Fatalf("seed plan: %v", err)
+	}
+
+	resp := call(t, s,
+		`{"jsonrpc":"2.0","id":71,"method":"tools/call","params":{"name":"plan_gate","arguments":{"workdir":"`+t.TempDir()+`"}}}`)
+	if resp.Error != nil {
+		t.Fatalf("plan_gate returned error: %+v", resp.Error)
+	}
+	var out planGatePayload
+	if err := json.Unmarshal([]byte(contentText(t, resp)), &out); err != nil {
+		t.Fatalf("plan_gate content not JSON: %v", err)
+	}
+	if out.StepsRemaining != 1 {
+		t.Errorf("steps_remaining = %d, want 1", out.StepsRemaining)
+	}
+	if !out.Verify.Passed {
+		t.Errorf("verify.passed = false, want true (empty verify_cmds is trivially passed)")
+	}
+	if !out.GoalMet {
+		t.Errorf("goal_met = false, want true (judge affirmed it)")
+	}
+	if out.CanStop {
+		t.Errorf("can_stop = true, want false (a step still pending must block the gate)")
+	}
+}
+
+// TestToolsCallPlanGateCanStop seeds a fully-done plan with a real passing
+// integration verify command and a judge that affirms goal_met, proving the
+// gate reports can_stop=true only once every axis agrees.
+func TestToolsCallPlanGateCanStop(t *testing.T) {
+	canned := `{"goal_met": true, "reason": "all done"}`
+	s, _ := newTestServer(t, canned)
+	if err := s.plan.SaveWith("build the thing", "the spec", []string{"go version"}, []plan.Step{
+		{ID: "s1", Title: "do it", Status: plan.StatusDone},
+	}); err != nil {
+		t.Fatalf("seed plan: %v", err)
+	}
+
+	resp := call(t, s,
+		`{"jsonrpc":"2.0","id":72,"method":"tools/call","params":{"name":"plan_gate","arguments":{"workdir":"`+t.TempDir()+`"}}}`)
+	if resp.Error != nil {
+		t.Fatalf("plan_gate returned error: %+v", resp.Error)
+	}
+	var out planGatePayload
+	if err := json.Unmarshal([]byte(contentText(t, resp)), &out); err != nil {
+		t.Fatalf("plan_gate content not JSON: %v", err)
+	}
+	if out.StepsRemaining != 0 {
+		t.Errorf("steps_remaining = %d, want 0", out.StepsRemaining)
+	}
+	if !out.Verify.Passed {
+		t.Errorf("verify.passed = false, want true (\"go version\" succeeds)")
+	}
+	if !out.GoalMet || out.GoalMetReason != "all done" {
+		t.Errorf("goal_met/reason = %v/%q, want true/\"all done\"", out.GoalMet, out.GoalMetReason)
+	}
+	if !out.CanStop {
+		t.Errorf("can_stop = false, want true (no steps remain, verify passed, goal met)")
+	}
+}
+
+// TestToolsCallPlanGateConservativeOnUnparseableJudge proves the gate never
+// reports goal_met/can_stop=true when the judge's output carries no parseable
+// verdict, even with zero steps remaining and verify passing.
+func TestToolsCallPlanGateConservativeOnUnparseableJudge(t *testing.T) {
+	s, _ := newTestServer(t, "not a JSON verdict at all")
+	if err := s.plan.SaveWith("build the thing", "", nil, []plan.Step{
+		{ID: "s1", Title: "do it", Status: plan.StatusDone},
+	}); err != nil {
+		t.Fatalf("seed plan: %v", err)
+	}
+
+	resp := call(t, s,
+		`{"jsonrpc":"2.0","id":73,"method":"tools/call","params":{"name":"plan_gate","arguments":{"workdir":"`+t.TempDir()+`"}}}`)
+	if resp.Error != nil {
+		t.Fatalf("plan_gate returned error: %+v", resp.Error)
+	}
+	var out planGatePayload
+	if err := json.Unmarshal([]byte(contentText(t, resp)), &out); err != nil {
+		t.Fatalf("plan_gate content not JSON: %v", err)
+	}
+	if out.GoalMet {
+		t.Errorf("goal_met = true, want false when the judge produced no parseable verdict")
+	}
+	if out.CanStop {
+		t.Errorf("can_stop = true, want false when the judge produced no parseable verdict")
+	}
+	if out.GoalMetReason == "" {
+		t.Errorf("goal_met_reason empty, want an explanation of the unparseable judge output")
+	}
+}
+
+// TestToolsCallPlanGateInvalidVerifyIsInternalError proves a plan whose
+// persisted verify_cmds is unsafe/non-allowlisted refuses the gate as a
+// config error (surfaced as an internal error by callPlanGate) rather than
+// running the judge on a poisoned state.
+func TestToolsCallPlanGateInvalidVerifyIsInternalError(t *testing.T) {
+	s, _ := newTestServer(t, "canned")
+	if err := s.plan.SaveWith("build the thing", "", []string{"rm -rf /"}, []plan.Step{
+		{ID: "s1", Title: "do it", Status: plan.StatusDone},
+	}); err != nil {
+		t.Fatalf("seed plan: %v", err)
+	}
+
+	resp := call(t, s,
+		`{"jsonrpc":"2.0","id":74,"method":"tools/call","params":{"name":"plan_gate","arguments":{"workdir":"`+t.TempDir()+`"}}}`)
+	if resp.Error == nil {
+		t.Fatalf("plan_gate with unsafe verify_cmds: error = nil, want an error")
+	}
+	if resp.Error.Code != codeInternalError {
+		t.Fatalf("plan_gate with unsafe verify_cmds: error code = %d, want %d", resp.Error.Code, codeInternalError)
 	}
 }

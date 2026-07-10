@@ -454,7 +454,7 @@ func tools() []toolDef {
 		},
 		{
 			Name:        "plan_next",
-			Description: "Return the next runnable step of the active plan (the first pending step in order whose depends_on are all done) plus the count of pending steps remaining. Response {step, remaining}: step is null when no step is runnable — if remaining>0 the plan is blocked on unmet dependencies, if remaining==0 the plan is complete. HOST LOOP: after plan establishes the plan, call plan_next, dispatch the returned step's prompt (review=true, at its suggested_model, gated by its suggested_verify), then plan_record its outcome and call plan_next again until step is null and remaining is 0.",
+			Description: "Return the next runnable step of the active plan (the first pending step in order whose depends_on are all done) plus the count of pending steps remaining. Response {step, remaining}: step is null when no step is runnable — if remaining>0 the plan is blocked on unmet dependencies, if remaining==0 the plan is complete. HOST LOOP: after plan establishes the plan, call plan_next, dispatch the returned step's prompt (review=true, at its suggested_model, gated by its suggested_verify), then plan_record its outcome and call plan_next again until step is null and remaining is 0. When step is null and remaining is 0, call plan_gate to decide whether the loop may terminate (it runs the integration verify_cmds and a goal-met judge).",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},
@@ -491,6 +491,17 @@ func tools() []toolDef {
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},
+			},
+		},
+		{
+			Name:        "plan_gate",
+			Description: "The autonomous loop's stop gate: runs the active plan's integration verify_cmds in workdir AND a read-only goal-met judge, returning {steps_remaining, verify, goal_met, goal_met_reason, can_stop}. Call after plan_next reports no runnable steps (remaining 0) to decide whether the loop may terminate; can_stop is true only when no steps remain AND verify passed AND the goal is judged met.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"workdir":     map[string]any{"type": "string", "description": "Optional working directory the integration verify_cmds run in and the goal-met judge is anchored to. Defaults to the server's working directory."},
+					"judge_model": map[string]any{"type": "string", "description": "Optional exact model id for the read-only goal-met judge. Omit to use the default strong judge model."},
+				},
 			},
 		},
 		{
@@ -586,6 +597,8 @@ func (s *Server) toolsCall(req *Request) Response {
 		return s.callPlanRevise(req, p.Arguments)
 	case "plan_status":
 		return s.callPlanStatus(req)
+	case "plan_gate":
+		return s.callPlanGate(req, p.Arguments)
 	case "memory":
 		return s.callMemory(req, p.Arguments)
 	case "agents":
@@ -880,6 +893,47 @@ func (s *Server) callPlanStatus(req *Request) Response {
 		return textResult(req.ID, map[string]any{"plan": nil})
 	}
 	return textResult(req.ID, map[string]any{"plan": st})
+}
+
+// callPlanGate runs the plan_gate tool: the autonomous loop's stop gate. It
+// loads the active plan, counts the not-yet-done steps, and asks the
+// orchestrator to run the plan's INTEGRATION verify_cmds in workdir AND a
+// read-only goal-met judge, returning {steps_remaining, verify, goal_met,
+// goal_met_reason, can_stop}. No active plan is invalid-params; a gate config
+// error (invalid verify_cmds) or judge/verify machinery failure surfaces as an
+// internal error. can_stop is true only when no steps remain AND verify passed
+// AND the goal is judged met.
+func (s *Server) callPlanGate(req *Request, args json.RawMessage) Response {
+	var in struct {
+		Workdir    string `json:"workdir"`
+		JudgeModel string `json:"judge_model"`
+	}
+	if err := decodeArgs(args, &in); err != nil {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: "+err.Error())
+	}
+	st, ok := s.plan.Load()
+	if !ok {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: no active plan")
+	}
+	// Steps remaining for the gate is every step not terminally done (a failed
+	// step counts as remaining — the goal is not complete while it stands).
+	remaining := 0
+	for _, step := range st.Steps {
+		if step.Status != plan.StatusDone {
+			remaining++
+		}
+	}
+	res, err := s.o.PlanGate(st.Goal, st.Spec, st.VerifyCmds, remaining, in.Workdir, in.JudgeModel)
+	if err != nil {
+		return errorResponse(req.ID, codeInternalError, "plan_gate failed: "+err.Error())
+	}
+	return textResult(req.ID, map[string]any{
+		"steps_remaining": res.StepsRemaining,
+		"verify":          res.Verify,
+		"goal_met":        res.GoalMet,
+		"goal_met_reason": res.GoalMetReason,
+		"can_stop":        res.CanStop,
+	})
 }
 
 // defaultJobWaitSec and maxJobWaitSec bound job_status's long-poll: the server

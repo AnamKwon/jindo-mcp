@@ -451,3 +451,49 @@ func TestParsePlanResponse_Garbage(t *testing.T) {
 		}
 	}
 }
+
+func TestParseGoalCheckResponse_ProseThenJSON(t *testing.T) {
+	stdout := `I read shared memory and inspected the repository.
+
+Here is the SHAPE you should emit (ignore this example):
+{"goal_met": true, "reason": "example only"}
+
+Verdict:
+{"goal_met": false, "reason": "the CLI flag is added but has no test"}`
+
+	goalMet, reason, ok := ParseGoalCheckResponse(stdout)
+	if !ok {
+		t.Fatalf("ParseGoalCheckResponse ok = false, want true")
+	}
+	// The LAST goal_met-bearing object wins over the earlier example.
+	if goalMet {
+		t.Errorf("goalMet = true, want false")
+	}
+	if reason != "the CLI flag is added but has no test" {
+		t.Errorf("reason = %q, want the last verdict's reason", reason)
+	}
+}
+
+func TestParseGoalCheckResponse_ExplicitTrue(t *testing.T) {
+	goalMet, reason, ok := ParseGoalCheckResponse(`{"goal_met": true, "reason": "done"}`)
+	if !ok || !goalMet || reason != "done" {
+		t.Errorf("ParseGoalCheckResponse = (%v, %q, %v), want (true, \"done\", true)", goalMet, reason, ok)
+	}
+}
+
+func TestParseGoalCheckResponse_Garbage(t *testing.T) {
+	for _, stdout := range []string{
+		"no json here at all",
+		"",
+		`{"reason": "no goal_met field"}`,
+		`{}`,
+	} {
+		goalMet, reason, ok := ParseGoalCheckResponse(stdout)
+		if ok {
+			t.Errorf("ParseGoalCheckResponse(%q) ok = true, want false", stdout)
+		}
+		if goalMet || reason != "" {
+			t.Errorf("ParseGoalCheckResponse(%q) = (%v, %q), want (false, \"\")", stdout, goalMet, reason)
+		}
+	}
+}

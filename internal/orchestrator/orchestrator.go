@@ -1301,6 +1301,140 @@ func (o *Orchestrator) judgeCandidates(task string, candidates []Candidate, judg
 	return &Candidate{Agent: route.Agent, Model: route.Model, Result: resp.Result, Status: resp.Status}
 }
 
+// GateResult is the autonomous loop's stop-gate outcome: the count of
+// not-yet-done plan steps (StepsRemaining), the OBJECTIVE integration signal
+// (Verify), the read-only goal-met judge's verdict (GoalMet/GoalMetReason), and
+// whether the loop may terminate (CanStop). CanStop is conservative by
+// construction: true ONLY when no steps remain AND verify passed AND the judge
+// affirmatively confirmed the goal is met — the gate must never claim the goal
+// is met when it could not check.
+type GateResult struct {
+	StepsRemaining int          `json:"steps_remaining"`
+	Verify         VerifyResult `json:"verify"`
+	GoalMet        bool         `json:"goal_met"`
+	GoalMetReason  string       `json:"goal_met_reason"`
+	CanStop        bool         `json:"can_stop"`
+}
+
+// goalCheckDirective is the short positional prompt handed to the goal-met judge
+// adapter; the substantive instruction (read memory + inspect repo + strict
+// goal-met verdict + JSON block) rides the BuildGoalCheckPrompt sysPrompt through
+// buildDispatchArgs, exactly as proposeDirective does for a propose. A non-empty
+// positional is required because some CLIs (e.g. claude -p) demand a prompt
+// argument even when the instruction travels via a flag.
+const goalCheckDirective = "Judge whether the stated goal is met as described in your instructions and end with the goal-check JSON block."
+
+// PlanGate is the autonomous loop's OBJECTIVE + JUDGED stop gate. It runs the
+// active plan's INTEGRATION verify commands (the machine signal) in workdir AND
+// a read-only goal-met judge (a strong model that reads shared memory and
+// inspects workdir), and reports whether the loop may stop. It is conservative
+// by construction: CanStop is true ONLY when no steps remain, the verify gate
+// objectively passed, AND the judge affirmatively confirmed the goal is met.
+//
+// workdir, when empty, defaults to jindo's process cwd (Getwd falling back to
+// memDir), mirroring DispatchMulti. judgeModel pins the goal-met judge's model;
+// empty uses defaultJudgeModel (planning/judging default to a strong model).
+//
+// An invalid/unsafe verifyCmds list is a gate CONFIG error, refused before
+// anything runs (mirroring dispatch's pre-run ValidateVerifyCmds). An empty
+// verifyCmds means there is no objective gate — the goal-met judge alone decides
+// — so verify is treated as trivially passed. The goal-met judge is best-effort:
+// ANY failure (routing/adapter/run/parse) yields GoalMet=false with a short
+// reason, so the gate never claims a goal is met when it could not check.
+func (o *Orchestrator) PlanGate(goal, spec string, verifyCmds []string, stepsRemaining int, workdir, judgeModel string) (GateResult, error) {
+	mem := o.dispatchStore()
+	memDir := mem.Root()
+
+	// Resolve the working directory ONCE (mirrors DispatchMulti's Getwd->memDir
+	// fallback): a non-empty workdir is the explicit anchor, else jindo's cwd.
+	if workdir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = memDir
+		}
+		workdir = cwd
+	}
+
+	// Objective machine gate: run the plan's INTEGRATION verify commands in
+	// workdir. Validate BEFORE running anything so an invalid/unsafe list refuses
+	// the gate as a config error rather than doing partial work. An empty list is
+	// no objective gate at all, so it is trivially passed and the judge decides.
+	var vr VerifyResult
+	if len(verifyCmds) > 0 {
+		if err := ValidateVerifyCmds(verifyCmds); err != nil {
+			return GateResult{}, err
+		}
+		vr = runVerify(workdir, verifyCmds)
+	} else {
+		vr = VerifyResult{Passed: true}
+	}
+
+	// Read-only goal-met judge, anchored to workdir. It sees the objective verify
+	// outcome (integrationSummary) alongside its own inspection.
+	goalMet, goalMetReason := o.judgeGoalMet(goal, spec, verifySummary(vr), workdir, memDir, judgeModel)
+
+	return GateResult{
+		StepsRemaining: stepsRemaining,
+		Verify:         vr,
+		GoalMet:        goalMet,
+		GoalMetReason:  goalMetReason,
+		CanStop:        stepsRemaining == 0 && vr.Passed && goalMet,
+	}, nil
+}
+
+// verifySummary renders the objective verify outcome as the short line handed to
+// the goal-met judge so it weighs the machine signal alongside its own
+// inspection: "integration verify passed", or "integration verify FAILED: <cmd>
+// exit <code>" naming the offending command.
+func verifySummary(vr VerifyResult) string {
+	if vr.Passed {
+		return "integration verify passed"
+	}
+	return fmt.Sprintf("integration verify FAILED: %s exit %d", vr.FailedCmd, vr.ExitCode)
+}
+
+// judgeGoalMet runs ONE read-only goal-met judge (a strong model, defaulting to
+// defaultJudgeModel) over goal+spec, anchored to workdir, and returns its
+// verdict. It mirrors proposeOne/reviewWith's read-only single-dispatch seam
+// (buildDispatchArgs reviewMode=true) so the judge can read memory + inspect
+// files but cannot write them. integrationSummary is the objective verify signal
+// (see verifySummary) so the judge sees it too. Best-effort: ANY failure
+// (routing/adapter/run/parse) returns (false, "goal-met judge unavailable: ...")
+// — the gate must NOT claim the goal is met when it could not check.
+func (o *Orchestrator) judgeGoalMet(goal, spec, integrationSummary, workdir, memDir, judgeModel string) (bool, string) {
+	if judgeModel == "" {
+		judgeModel = defaultJudgeModel
+	}
+	// model-pin path: routing infers the agent from the model id (agent="").
+	route, err := o.Route(goal, "", "", judgeModel)
+	if err != nil {
+		return false, "goal-met judge unavailable: " + err.Error()
+	}
+	ad, err := o.GetAdapter(route.Agent)
+	if err != nil {
+		return false, "goal-met judge unavailable: " + err.Error()
+	}
+
+	sysPrompt := agentproto.BuildGoalCheckPrompt(memDir, goal, spec, integrationSummary)
+	// Read-only run anchored to workdir: same per-CLI seam as reviewWith/proposeOne
+	// (reviewMode=true), so the judge reads memory + inspects files via the
+	// directory grants but cannot write/edit. Passing workdir as BOTH the process
+	// cwd and the explicit workdir grants points every CLI's directory access at
+	// the directory verify ran in.
+	taskToSend, extra := buildDispatchArgs(route.Agent, goalCheckDirective, sysPrompt, memDir, workdir, true, "", workdir)
+
+	stdout, err := ad.RunWith(taskToSend, route.Model, extra)
+	if err != nil {
+		return false, "goal-met judge unavailable: " + err.Error()
+	}
+
+	goalMet, reason, ok := agentproto.ParseGoalCheckResponse(stdout)
+	if !ok {
+		return false, "goal-met judge produced no parseable verdict"
+	}
+	return goalMet, reason
+}
+
 // noteReviewFailures records, sequentially after the concurrent join, one
 // best-effort note per reviewer that failed (ok==false), so failures stay
 // visible without any memory writes happening on the concurrent path.

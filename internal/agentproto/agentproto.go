@@ -525,6 +525,71 @@ func BuildJudgePrompt(memoryDir, task string, candidates []string) string {
 	return b.String()
 }
 
+// BuildGoalCheckPrompt returns the system-prompt text that instructs a headless
+// GOAL-MET JUDGE to decide STRICTLY whether a stated goal (and its clarifying
+// spec) is ACTUALLY met by the current state of the repository — not merely that
+// some code changed or an agent claimed success. It reads the shared bounded
+// memory under memoryDir AND inspects the repository/working directory, weighs
+// the objective integrationSummary (the machine verify signal the loop already
+// ran), and MUST NOT write, create, or edit any files. It terminates with
+// exactly one JSON block {"goal_met": true|false, "reason": "..."} so
+// ParseGoalCheckResponse reads it unchanged. It is the JUDGED half of the
+// autonomous loop's stop gate (the objective half is the integration verify).
+func BuildGoalCheckPrompt(memoryDir, goal, spec, integrationSummary string) string {
+	var b strings.Builder
+
+	b.WriteString("You are a headless GOAL-MET JUDGE driven by an orchestrator, working in\n")
+	b.WriteString("READ-ONLY mode. Your job is to decide STRICTLY whether the stated goal is\n")
+	b.WriteString("ACTUALLY met by the current state of the repository — not merely whether some\n")
+	b.WriteString("code changed or an agent claimed success. You do NOT modify any files; you\n")
+	b.WriteString("return only a verdict.\n\n")
+
+	b.WriteString("STEP 1 - READ SHARED MEMORY FIRST.\n")
+	b.WriteString("Before judging, read the shared memory under the bounded directory:\n")
+	b.WriteString("    ")
+	b.WriteString(memoryDir)
+	b.WriteString("\n")
+	b.WriteString("This directory holds prior agents' context (memory.json and the .jindo store,\n")
+	b.WriteString("plus a possible reserved \"_digest\" summary of older facts). Load that context\n")
+	b.WriteString("so your judgment is grounded in what was actually attempted.\n\n")
+
+	b.WriteString("STEP 2 - INSPECT THE REPOSITORY AND JUDGE THE GOAL.\n")
+	b.WriteString("The goal to judge is:\n")
+	b.WriteString("---- GOAL ----\n")
+	b.WriteString(goal)
+	b.WriteString("\n---- END GOAL ----\n\n")
+	if spec != "" {
+		b.WriteString("The clarified intent (spec) that further defines \"done\" is:\n")
+		b.WriteString("---- SPEC ----\n")
+		b.WriteString(spec)
+		b.WriteString("\n---- END SPEC ----\n\n")
+	}
+	b.WriteString("The objective integration-verify signal (the build/test/lint the loop already\n")
+	b.WriteString("ran) is:\n")
+	b.WriteString("    ")
+	b.WriteString(integrationSummary)
+	b.WriteString("\n\n")
+	b.WriteString("Inspect the repository/working directory (read files, look at the actual\n")
+	b.WriteString("implementation and its tests) and judge STRICTLY whether the goal AND spec are\n")
+	b.WriteString("genuinely satisfied by what is present — not merely that files were touched or\n")
+	b.WriteString("that some progress was made. If any required part is missing, incomplete, or\n")
+	b.WriteString("unverified, the goal is NOT met. You may read files and memory, but you MUST\n")
+	b.WriteString("NOT write, create, edit, or delete any files.\n\n")
+
+	b.WriteString("STEP 3 - END WITH EXACTLY ONE JSON BLOCK.\n")
+	b.WriteString("After any prose, the LAST thing in your output must be exactly one JSON object\n")
+	b.WriteString("matching this goal-check contract (a single top-level {...} block):\n\n")
+	b.WriteString("{\n")
+	b.WriteString("  \"goal_met\": true|false, // STRICT: true only if the goal+spec are actually met\n")
+	b.WriteString("  \"reason\":   string      // brief justification for the verdict\n")
+	b.WriteString("}\n\n")
+	b.WriteString("Emit only ONE such JSON object and make it the final content of your output so\n")
+	b.WriteString("it can be parsed reliably. Code fences are optional, but the object must be\n")
+	b.WriteString("valid JSON.\n")
+
+	return b.String()
+}
+
 // ParsePlanResponse extracts the last balanced top-level JSON object from
 // arbitrary planner stdout and unmarshals it into {steps,summary,verify_cmds},
 // reusing the same tolerant brace-depth scanner as ParseResponse
@@ -557,6 +622,38 @@ func ParsePlanResponse(stdout string) (steps []PlanStep, summary string, verifyC
 	}
 
 	return nil, "", nil, false
+}
+
+// ParseGoalCheckResponse extracts the last balanced top-level JSON object from a
+// goal-met judge's stdout and unmarshals it into {goal_met,reason}, reusing the
+// same tolerant brace-depth scanner as ParseResponse/ParsePlanResponse
+// (topLevelObjectSpans). It prefers the LAST span that both unmarshals cleanly
+// AND carries a "goal_met" field, so an example object printed earlier in the
+// prose — or an unrelated {} — does not masquerade as the verdict.
+//
+// ok is false when no object carrying goal_met is found; in that case goalMet is
+// false and reason is empty. It never panics.
+func ParseGoalCheckResponse(stdout string) (goalMet bool, reason string, ok bool) {
+	spans := topLevelObjectSpans(stdout)
+
+	for i := len(spans) - 1; i >= 0; i-- {
+		var v struct {
+			GoalMet *bool  `json:"goal_met"`
+			Reason  string `json:"reason"`
+		}
+		if err := json.Unmarshal([]byte(spans[i]), &v); err != nil {
+			continue
+		}
+		// Skip objects that do not carry a goal_met field (e.g. a stray {} or an
+		// unrelated JSON block) so they cannot be mistaken for a verdict. Using a
+		// *bool distinguishes "absent" from an explicit false.
+		if v.GoalMet == nil {
+			continue
+		}
+		return *v.GoalMet, v.Reason, true
+	}
+
+	return false, "", false
 }
 
 // topLevelObjectSpans scans s and returns every complete balanced top-level

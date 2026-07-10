@@ -2738,3 +2738,115 @@ func TestDispatchInsightRoundTrip(t *testing.T) {
 		t.Fatalf("unrelated dispatch wrongly injected an insight brief; argv=%v", argv)
 	}
 }
+
+// newGateOrch builds an Orchestrator whose goal-met judge is a captureAdapter
+// returning canned goal-check JSON, with a deterministic model-pinned route so
+// the gate test does not depend on the real routing model table.
+func newGateOrch(t *testing.T, canned string) (*Orchestrator, *captureAdapter) {
+	t.Helper()
+	mem := memory.New(t.TempDir())
+	mgr, _ := newFakeManager(0)
+	cap := &captureAdapter{name: "claude", canned: canned}
+	o := New(mem, mgr)
+	o.Route = func(task, agentName, priority, model string) (routing.Selection, error) {
+		return routing.Selection{Agent: "claude", Model: model, Difficulty: "hard"}, nil
+	}
+	o.GetAdapter = func(name string) (agent.Adapter, error) { return cap, nil }
+	return o, cap
+}
+
+// TestPlanGateCanStop covers the affirmative path: no steps remain, an empty
+// verify list is trivially passed, and the judge confirms goal_met -> can_stop.
+func TestPlanGateCanStop(t *testing.T) {
+	o, cap := newGateOrch(t, `{"goal_met": true, "reason": "all done"}`)
+
+	res, err := o.PlanGate("the goal", "the spec", nil, 0, t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("PlanGate error: %v", err)
+	}
+	if !res.Verify.Passed {
+		t.Errorf("Verify.Passed = false, want true (empty verify list is trivially passed)")
+	}
+	if !res.GoalMet || res.GoalMetReason != "all done" {
+		t.Errorf("goal-met = (%v, %q), want (true, \"all done\")", res.GoalMet, res.GoalMetReason)
+	}
+	if !res.CanStop {
+		t.Errorf("CanStop = false, want true (no steps remain, verify passed, goal met)")
+	}
+	// The judge ran read-only: plan mode + write tools disallowed for claude.
+	if !strings.Contains(strings.Join(cap.gotExtra, "\x00"), "plan") {
+		t.Errorf("judge extras = %v, want read-only plan mode", cap.gotExtra)
+	}
+}
+
+// TestPlanGateStepsRemainingBlocks proves CanStop is conservative on the step
+// axis: even with verify passed and the goal judged met, remaining steps block a
+// stop.
+func TestPlanGateStepsRemainingBlocks(t *testing.T) {
+	o, _ := newGateOrch(t, `{"goal_met": true, "reason": "done"}`)
+
+	res, err := o.PlanGate("g", "", nil, 1, t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("PlanGate error: %v", err)
+	}
+	if !res.GoalMet || !res.Verify.Passed {
+		t.Fatalf("precondition: want goal met and verify passed, got goalMet=%v verify=%v", res.GoalMet, res.Verify.Passed)
+	}
+	if res.CanStop {
+		t.Errorf("CanStop = true with 1 step remaining, want false")
+	}
+}
+
+// TestPlanGateJudgeNotMet proves a not-met verdict blocks a stop and its reason
+// is surfaced.
+func TestPlanGateJudgeNotMet(t *testing.T) {
+	o, _ := newGateOrch(t, `{"goal_met": false, "reason": "missing tests"}`)
+
+	res, err := o.PlanGate("g", "", nil, 0, t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("PlanGate error: %v", err)
+	}
+	if res.GoalMet || res.CanStop {
+		t.Errorf("goalMet=%v canStop=%v, want both false", res.GoalMet, res.CanStop)
+	}
+	if res.GoalMetReason != "missing tests" {
+		t.Errorf("GoalMetReason = %q, want %q", res.GoalMetReason, "missing tests")
+	}
+}
+
+// TestPlanGateJudgeUnavailableIsConservative proves the gate never claims the
+// goal is met when the judge could not run (here GetAdapter fails): GoalMet is
+// false with an explanatory reason, and CanStop is false.
+func TestPlanGateJudgeUnavailableIsConservative(t *testing.T) {
+	mem := memory.New(t.TempDir())
+	mgr, _ := newFakeManager(0)
+	o := New(mem, mgr)
+	o.Route = func(task, agentName, priority, model string) (routing.Selection, error) {
+		return routing.Selection{Agent: "claude", Model: model, Difficulty: "hard"}, nil
+	}
+	o.GetAdapter = func(name string) (agent.Adapter, error) {
+		return nil, fmt.Errorf("no adapter for %q", name)
+	}
+
+	res, err := o.PlanGate("g", "", nil, 0, t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("PlanGate error: %v", err)
+	}
+	if res.GoalMet || res.CanStop {
+		t.Errorf("goalMet=%v canStop=%v, want both false when the judge is unavailable", res.GoalMet, res.CanStop)
+	}
+	if !strings.Contains(res.GoalMetReason, "goal-met judge unavailable") {
+		t.Errorf("GoalMetReason = %q, want it to explain the judge was unavailable", res.GoalMetReason)
+	}
+}
+
+// TestPlanGateInvalidVerifyIsConfigError proves an unsafe/non-allowlisted verify
+// command refuses the gate as a config error before running the judge.
+func TestPlanGateInvalidVerifyIsConfigError(t *testing.T) {
+	o, _ := newGateOrch(t, `{"goal_met": true, "reason": "done"}`)
+
+	_, err := o.PlanGate("g", "", []string{"rm -rf /"}, 0, t.TempDir(), "")
+	if err == nil {
+		t.Fatalf("PlanGate error = nil, want a gate-config error for a non-allowlisted verify command")
+	}
+}
