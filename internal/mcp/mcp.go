@@ -33,6 +33,7 @@ import (
 	"jindo/internal/jobs"
 	"jindo/internal/memory"
 	"jindo/internal/meta"
+	"jindo/internal/modelscan"
 	"jindo/internal/orchestrator"
 	"jindo/internal/plan"
 	"jindo/internal/routing"
@@ -552,6 +553,14 @@ func tools() []toolDef {
 			},
 		},
 		{
+			Name:        "models_refresh",
+			Description: "Probe each installed agent CLI for its actually-available models (agy: full list via `agy models`; codex: active model via `codex doctor`; claude: none) and return the inventory plus HEURISTIC routing proposals for models not yet in the static table. READ-ONLY: it does not modify routing — a human/the routing owner reviews the proposals. Use to detect when a user's available model set has changed.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
+		{
 			Name:        "compact",
 			Description: "Trigger memory compaction to bound the working set (drops superseded/expired entries, folds the cold tail into a digest, keeps last-N notes).",
 			InputSchema: map[string]any{
@@ -634,6 +643,8 @@ func (s *Server) toolsCall(req *Request) Response {
 		return s.callMemory(req, p.Arguments)
 	case "agents":
 		return s.callAgents(req)
+	case "models_refresh":
+		return s.callModelsRefresh(req)
 	case "compact":
 		return s.callCompact(req, p.Arguments)
 	case "calibrate":
@@ -1121,6 +1132,13 @@ func (s *Server) callAgents(req *Request) Response {
 		"agents":    routing.AgentsModels(),
 		"available": routing.AgentAvailability(),
 	})
+}
+
+// callModelsRefresh runs the read-only models_refresh tool: probe every agent
+// CLI for its available models and return the inventory plus HEURISTIC routing
+// proposals for models not yet in the static table. It never modifies routing.
+func (s *Server) callModelsRefresh(req *Request) Response {
+	return textResult(req.ID, modelscan.Refresh())
 }
 
 // callCompact runs the compact tool: decode optional {max_entries, max_notes},

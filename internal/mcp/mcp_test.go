@@ -126,8 +126,8 @@ func TestToolsList(t *testing.T) {
 	if !ok {
 		t.Fatalf("tools missing/wrong type: %v", m["tools"])
 	}
-	if len(toolsRaw) != 15 {
-		t.Fatalf("tools length = %d, want 15", len(toolsRaw))
+	if len(toolsRaw) != 16 {
+		t.Fatalf("tools length = %d, want 16", len(toolsRaw))
 	}
 	got := make([]string, 0, 9)
 	for _, tr := range toolsRaw {
@@ -142,7 +142,7 @@ func TestToolsList(t *testing.T) {
 		}
 	}
 	sort.Strings(got)
-	want := []string{"agents", "calibrate", "compact", "dispatch", "dispatch_async", "dispatch_multi", "dispatch_multi_async", "job_status", "memory", "plan", "plan_gate", "plan_next", "plan_record", "plan_revise", "plan_status"}
+	want := []string{"agents", "calibrate", "compact", "dispatch", "dispatch_async", "dispatch_multi", "dispatch_multi_async", "job_status", "memory", "models_refresh", "plan", "plan_gate", "plan_next", "plan_record", "plan_revise", "plan_status"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("tool names = %v, want %v", got, want)
 	}
