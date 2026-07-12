@@ -1,0 +1,17 @@
+{
+  "implementation": {
+    "best_agent": "codex",
+    "verified": "2/2",
+    "avg_secs": 17.9
+  },
+  "debugging": {
+    "best_agent": "codex",
+    "verified": "1/1",
+    "avg_secs": 12.2
+  },
+  "test_generation": {
+    "best_agent": "codex",
+    "verified": "1/1",
+    "avg_secs": 17.0
+  }
+}
