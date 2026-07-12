@@ -384,7 +384,7 @@ func tools() []toolDef {
 					"effort":   effortSchemaProp,
 					"review": map[string]any{
 						"type":        "boolean",
-						"description": "Optional opt-in cross-model peer review of the dispatched result. Defaults to false (no review); set true to have a different model review the result and, on a critical finding, trigger one revision round. Review is ADVISORY — it NEVER fails the dispatch. Do NOT treat review=true (or a returned result) as a passed quality gate: consult result.review_status {requested, completed, gate_passed, confidence} to know whether the review actually completed and gated. Only review_status.gate_passed==true means cross-model review ran to completion with no unresolved critical finding (confidence \"reviewed\"); \"unverified\" means it did not complete and \"review_failed\" means a critical finding survived. The OBJECTIVE verify gate remains the primary signal.",
+						"description": "Optional opt-in cross-model peer review of the dispatched result. Defaults to false (no review); set true to have a different model review the result and, on a critical finding, trigger one revision round. Review is ADVISORY — it NEVER fails the dispatch. Do NOT treat review=true (or a returned result) as a passed quality gate: consult result.review_status {requested, completed, gate_passed, confidence} to know whether the review actually completed and gated. Only review_status.gate_passed==true means cross-model review ran to completion with no unresolved critical finding (confidence \"reviewed\"); \"unverified\" means it did not complete and \"review_failed\" means a critical finding survived. The OBJECTIVE verify gate remains the primary signal. When review runs, the returned result.reviews carries, per reviewer and in the aggregate, an \"items\" array of the actual findings ({severity, title, message}, bounded and highest-severity-first) — not just per-severity counts — so the host can act on the specific issues a reviewer flagged.",
 					},
 					"verify":  verifySchemaProp,
 					"workdir": workdirSchemaProp,
@@ -411,7 +411,7 @@ func tools() []toolDef {
 					"effort":   effortSchemaProp,
 					"review": map[string]any{
 						"type":        "boolean",
-						"description": "Optional opt-in cross-model peer review of the dispatched result. Defaults to false (no review); set true to have a different model review the result and, on a critical finding, trigger one revision round. Review is ADVISORY — it NEVER fails the dispatch. Do NOT treat review=true (or a returned result) as a passed quality gate: consult result.review_status {requested, completed, gate_passed, confidence} to know whether the review actually completed and gated. Only review_status.gate_passed==true means cross-model review ran to completion with no unresolved critical finding (confidence \"reviewed\"); \"unverified\" means it did not complete and \"review_failed\" means a critical finding survived. The OBJECTIVE verify gate remains the primary signal.",
+						"description": "Optional opt-in cross-model peer review of the dispatched result. Defaults to false (no review); set true to have a different model review the result and, on a critical finding, trigger one revision round. Review is ADVISORY — it NEVER fails the dispatch. Do NOT treat review=true (or a returned result) as a passed quality gate: consult result.review_status {requested, completed, gate_passed, confidence} to know whether the review actually completed and gated. Only review_status.gate_passed==true means cross-model review ran to completion with no unresolved critical finding (confidence \"reviewed\"); \"unverified\" means it did not complete and \"review_failed\" means a critical finding survived. The OBJECTIVE verify gate remains the primary signal. When review runs, the returned result.reviews carries, per reviewer and in the aggregate, an \"items\" array of the actual findings ({severity, title, message}, bounded and highest-severity-first) — not just per-severity counts — so the host can act on the specific issues a reviewer flagged.",
 					},
 					"verify":  verifySchemaProp,
 					"workdir": workdirSchemaProp,
@@ -703,9 +703,9 @@ func runDispatch(o *orchestrator.Orchestrator, in dispatchArgs) (map[string]any,
 		"rationale":  res.Rationale,
 	}
 	// Surface EVERY cross-model reviewer's outcome (verdict, reviewer, finding
-	// counts) only when review:true ran, so the host can see WHAT each reviewer
-	// found and gate the next step. Omitted for review-off dispatch, keeping the
-	// legacy payload shape.
+	// counts, and the actual findings in "items") only when review:true ran, so the
+	// host can see WHAT each reviewer found and gate the next step. Omitted for
+	// review-off dispatch, keeping the legacy payload shape.
 	if len(res.Reviews) > 0 {
 		payload["reviews"] = res.Reviews
 	}

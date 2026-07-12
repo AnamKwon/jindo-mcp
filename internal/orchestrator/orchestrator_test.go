@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"jindo/internal/agent"
+	"jindo/internal/agentproto"
 	"jindo/internal/memory"
 	"jindo/internal/policy"
 	"jindo/internal/routing"
@@ -3264,4 +3265,147 @@ func TestDispatchAuto(t *testing.T) {
 			t.Fatalf("in-place dispatch must write marker.go into the workdir: %v", err)
 		}
 	})
+}
+
+// TestBoundFindings covers the bounding rules used to carry actual finding
+// bodies in reviewRecord.Items: highest-severity-first stable ordering, the
+// maxReviewFindingItems cap, and per-Message byte truncation with a marker.
+func TestBoundFindings(t *testing.T) {
+	t.Run("severity ordering preserves input order within a severity", func(t *testing.T) {
+		in := []agentproto.ReviewFinding{
+			{Severity: "info", Title: "i1"},
+			{Severity: "critical", Title: "c1"},
+			{Severity: "minor", Title: "m1"},
+			{Severity: "major", Title: "M1"},
+			{Severity: "critical", Title: "c2"},
+			{Severity: "major", Title: "M2"},
+		}
+		got := boundFindings(in)
+		wantTitles := []string{"c1", "c2", "M1", "M2", "m1", "i1"}
+		if len(got) != len(wantTitles) {
+			t.Fatalf("len = %d, want %d", len(got), len(wantTitles))
+		}
+		for i, w := range wantTitles {
+			if got[i].Title != w {
+				t.Fatalf("order[%d] = %q, want %q (full: %+v)", i, got[i].Title, w, got)
+			}
+		}
+	})
+
+	t.Run("caps at maxReviewFindingItems keeping highest severity", func(t *testing.T) {
+		var in []agentproto.ReviewFinding
+		// 5 critical then many info; the cap must keep the criticals.
+		for i := 0; i < 5; i++ {
+			in = append(in, agentproto.ReviewFinding{Severity: "critical", Title: fmt.Sprintf("c%d", i)})
+		}
+		for i := 0; i < maxReviewFindingItems+10; i++ {
+			in = append(in, agentproto.ReviewFinding{Severity: "info", Title: fmt.Sprintf("i%d", i)})
+		}
+		got := boundFindings(in)
+		if len(got) != maxReviewFindingItems {
+			t.Fatalf("len = %d, want %d", len(got), maxReviewFindingItems)
+		}
+		for i := 0; i < 5; i++ {
+			if got[i].Severity != "critical" {
+				t.Fatalf("item %d severity = %q, want critical (criticals must survive the cap)", i, got[i].Severity)
+			}
+		}
+	})
+
+	t.Run("truncates an over-long message with a marker", func(t *testing.T) {
+		long := strings.Repeat("x", maxReviewFindingMsg+500)
+		got := boundFindings([]agentproto.ReviewFinding{{Severity: "major", Message: long}})
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1", len(got))
+		}
+		if len(got[0].Message) > maxReviewFindingMsg {
+			t.Fatalf("message len = %d, want <= %d", len(got[0].Message), maxReviewFindingMsg)
+		}
+		if !strings.HasSuffix(got[0].Message, reviewFindingTruncMarker) {
+			t.Fatalf("truncated message must end with %q", reviewFindingTruncMarker)
+		}
+	})
+
+	t.Run("short message is left intact", func(t *testing.T) {
+		got := boundFindings([]agentproto.ReviewFinding{{Severity: "minor", Message: "short and fine"}})
+		if got[0].Message != "short and fine" {
+			t.Fatalf("short message altered: %q", got[0].Message)
+		}
+	})
+
+	t.Run("empty input returns nil", func(t *testing.T) {
+		if got := boundFindings(nil); got != nil {
+			t.Fatalf("boundFindings(nil) = %+v, want nil", got)
+		}
+	})
+}
+
+// TestReviewRecordItems verifies the actual finding bodies ride along on both the
+// per-reviewer records and the aggregate: a parsing reviewer's Items carry its
+// findings (bounded, highest-severity-first, over-long Message truncated), the
+// aggregate merges Items across successful reviewers, and an errored reviewer
+// keeps Items nil (unchanged shape).
+func TestReviewRecordItems(t *testing.T) {
+	longMsg := strings.Repeat("y", maxReviewFindingMsg+200)
+	results := []reviewerResult{
+		{
+			sel: routing.Selection{Agent: "agy", Model: "gemini"},
+			rev: agentproto.ReviewResponse{
+				Verdict: "changes_requested",
+				Findings: []agentproto.ReviewFinding{
+					{Severity: "minor", Title: "a-minor", Message: "small"},
+					{Severity: "critical", Title: "a-critical", Message: longMsg},
+				},
+			},
+			ok: true,
+		},
+		{
+			sel: routing.Selection{Agent: "codex", Model: "gpt"},
+			rev: agentproto.ReviewResponse{
+				Verdict:  "approved",
+				Findings: []agentproto.ReviewFinding{{Severity: "major", Title: "b-major", Message: "med"}},
+			},
+			ok: true,
+		},
+		{
+			// Errored reviewer: no parseable findings.
+			sel: routing.Selection{Agent: "claude", Model: "opus"},
+			rev: agentproto.ReviewResponse{Verdict: agentproto.VerdictUnparsed},
+			ok:  false,
+		},
+	}
+
+	per := perReviewerRecords(results)
+	if len(per) != 3 {
+		t.Fatalf("len(per) = %d, want 3", len(per))
+	}
+
+	// Reviewer 0: Items present, highest-severity-first, long message truncated.
+	if len(per[0].Items) != 2 {
+		t.Fatalf("per[0].Items len = %d, want 2", len(per[0].Items))
+	}
+	if per[0].Items[0].Severity != "critical" || per[0].Items[1].Severity != "minor" {
+		t.Fatalf("per[0].Items not highest-severity-first: %+v", per[0].Items)
+	}
+	if len(per[0].Items[0].Message) > maxReviewFindingMsg || !strings.HasSuffix(per[0].Items[0].Message, reviewFindingTruncMarker) {
+		t.Fatalf("per[0] critical message not truncated: len=%d", len(per[0].Items[0].Message))
+	}
+
+	// Errored reviewer: Items nil.
+	if per[2].Items != nil {
+		t.Fatalf("errored reviewer Items = %+v, want nil", per[2].Items)
+	}
+
+	// Aggregate merges Items across the two successful reviewers, ordered by
+	// severity (critical, major, minor) and excludes the errored reviewer.
+	agg := aggregateReviews(per, "ok", 0)
+	if len(agg.Items) != 3 {
+		t.Fatalf("agg.Items len = %d, want 3 (2 from agy + 1 from codex)", len(agg.Items))
+	}
+	wantSev := []string{"critical", "major", "minor"}
+	for i, w := range wantSev {
+		if agg.Items[i].Severity != w {
+			t.Fatalf("agg.Items[%d] severity = %q, want %q (full: %+v)", i, agg.Items[i].Severity, w, agg.Items)
+		}
+	}
 }

@@ -1759,6 +1759,11 @@ func perReviewerRecords(results []reviewerResult) []reviewRecord {
 			Findings:      countFindings(r.rev.Findings),
 			Errored:       !r.ok,
 		}
+		// Carry the actual finding bodies (bounded) only for a reviewer that
+		// parsed; an errored reviewer keeps Items nil (unchanged shape).
+		if r.ok {
+			recs[i].Items = boundFindings(r.rev.Findings)
+		}
 	}
 	return recs
 }
@@ -1899,6 +1904,7 @@ func aggregateReviews(perReviewer []reviewRecord, finalStatus string, revisionRo
 	agents := make([]string, len(perReviewer))
 	models := make([]string, len(perReviewer))
 	var findings findingCounts
+	var items []agentproto.ReviewFinding
 	worstRank := 0
 	allErrored := len(perReviewer) > 0
 	for i, r := range perReviewer {
@@ -1909,6 +1915,11 @@ func aggregateReviews(perReviewer []reviewRecord, finalStatus string, revisionRo
 		findings.Major += r.Findings.Major
 		findings.Minor += r.Findings.Minor
 		findings.Info += r.Findings.Info
+		// Merge the actual finding bodies across the reviewers that succeeded (an
+		// errored reviewer has Items nil), matching the mergeFindings union.
+		if !r.Errored {
+			items = append(items, r.Items...)
+		}
 		if rank := verdictRank(r.Verdict); rank > worstRank {
 			worstRank = rank
 		}
@@ -1921,6 +1932,7 @@ func aggregateReviews(perReviewer []reviewRecord, finalStatus string, revisionRo
 		ReviewerModel:  strings.Join(models, ","),
 		Verdict:        verdictForRank(worstRank),
 		Findings:       findings,
+		Items:          boundFindings(items),
 		RevisionRounds: revisionRounds,
 		FinalStatus:    finalStatus,
 		Errored:        allErrored,
@@ -1995,6 +2007,66 @@ func (o *Orchestrator) writeDispatchLog(memDir string, entry dispatchLogEntry) {
 	if err := appendDispatchLog(memDir, entry); err != nil {
 		_ = o.dispatchStore().AppendNote("orchestrator", fmt.Sprintf("dispatch log write failed for %s: %v", entry.Key, err))
 	}
+}
+
+// maxReviewFindingItems caps how many findings a single reviewRecord carries in
+// Items, so a chatty reviewer cannot bloat the dispatch payload. The highest
+// severities are kept first.
+const maxReviewFindingItems = 20
+
+// maxReviewFindingMsg caps each carried finding's Message length in bytes; a
+// longer message is truncated to this length with a trailing marker.
+const maxReviewFindingMsg = 600
+
+// reviewFindingTruncMarker is appended (replacing the cut tail) when a finding's
+// Message is truncated to maxReviewFindingMsg bytes.
+const reviewFindingTruncMarker = "…(truncated)"
+
+// findingSeverityRank orders findings for boundFindings: critical first, then
+// major, minor, info; any other/empty severity sorts last.
+func findingSeverityRank(severity string) int {
+	switch severity {
+	case "critical":
+		return 0
+	case "major":
+		return 1
+	case "minor":
+		return 2
+	case "info":
+		return 3
+	default:
+		return 4
+	}
+}
+
+// boundFindings returns a bounded copy of findings for a reviewRecord's Items so
+// a chatty reviewer cannot bloat the payload: it orders them highest-severity
+// first (critical, major, minor, info; input order preserved within a severity),
+// caps the count at maxReviewFindingItems, and truncates each Message to
+// maxReviewFindingMsg bytes (a trailing "…(truncated)" marker replacing the cut
+// tail). Empty input returns nil, so an errored reviewer's Items stay nil.
+func boundFindings(findings []agentproto.ReviewFinding) []agentproto.ReviewFinding {
+	if len(findings) == 0 {
+		return nil
+	}
+	ordered := make([]agentproto.ReviewFinding, len(findings))
+	copy(ordered, findings)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return findingSeverityRank(ordered[i].Severity) < findingSeverityRank(ordered[j].Severity)
+	})
+	if len(ordered) > maxReviewFindingItems {
+		ordered = ordered[:maxReviewFindingItems]
+	}
+	for i := range ordered {
+		if len(ordered[i].Message) > maxReviewFindingMsg {
+			keep := maxReviewFindingMsg - len(reviewFindingTruncMarker)
+			if keep < 0 {
+				keep = 0
+			}
+			ordered[i].Message = ordered[i].Message[:keep] + reviewFindingTruncMarker
+		}
+	}
+	return ordered
 }
 
 // countFindings tallies findings by severity for the reviewRecord, without
@@ -2155,8 +2227,12 @@ type reviewRecord struct {
 	ReviewerModel  string        `json:"reviewer_model"`
 	Verdict        string        `json:"verdict"`
 	Findings       findingCounts `json:"findings"`
-	RevisionRounds int           `json:"revision_rounds"`
-	FinalStatus    string        `json:"final_status"`
+	// Items carries the actual findings (severity/title/message) this reviewer
+	// reported, bounded; complements the Findings counts so a host sees WHAT was
+	// flagged, not just how many.
+	Items          []agentproto.ReviewFinding `json:"items,omitempty"`
+	RevisionRounds int                        `json:"revision_rounds"`
+	FinalStatus    string                     `json:"final_status"`
 	// Errored marks a best-effort reviewer failure (no reviewer available,
 	// adapter error, or unparseable review): the review did NOT change the
 	// dispatch outcome, but the attempt is still recorded for visibility.
