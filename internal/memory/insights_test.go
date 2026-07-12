@@ -65,6 +65,81 @@ func TestAddInsightBlankIsNoop(t *testing.T) {
 	}
 }
 
+// TestAddInsightWithInjectedNeverReinforces: an insight text that was INJECTED
+// into the contributing agent's prompt and merely parroted back is not an
+// independent rediscovery, so AddInsightWith must NOT reinforce a matching
+// existing insight (hits/salience frozen), while a non-injected re-derivation
+// still reinforces, and a brand-new parroted text is recorded but flagged
+// DerivedFromInjected.
+func TestAddInsightWithInjectedNeverReinforces(t *testing.T) {
+	m := New(t.TempDir())
+
+	const text = "auth lives in internal/authz"
+	added, err := m.AddInsight(text, "codex", "gpt-5.5", nil)
+	if err != nil || !added {
+		t.Fatalf("seed AddInsight: added=%v err=%v (want true, nil)", added, err)
+	}
+	before, err := m.Insights()
+	if err != nil || len(before) != 1 {
+		t.Fatalf("Insights after seed: got %d err=%v (want 1)", len(before), err)
+	}
+	baseHits, baseSal := before[0].Hits, before[0].Salience
+
+	// The same text was injected into this agent's prompt and echoed back:
+	// must NOT reinforce.
+	added, err = m.AddInsightWith(text, "claude", "opus-4-8", nil, []string{text})
+	if err != nil {
+		t.Fatalf("parroted AddInsightWith: %v", err)
+	}
+	if added {
+		t.Fatalf("parroted AddInsightWith added a new insight; want no-op reinforcement")
+	}
+	got, _ := m.Insights()
+	if len(got) != 1 {
+		t.Fatalf("insight count = %d after parrot, want 1", len(got))
+	}
+	if got[0].Hits != baseHits || got[0].Salience != baseSal {
+		t.Fatalf("parrot reinforced insight: hits %d->%d salience %v->%v (want frozen)",
+			baseHits, got[0].Hits, baseSal, got[0].Salience)
+	}
+
+	// A genuine (non-injected) re-derivation still reinforces.
+	added, err = m.AddInsightWith(text, "agy", "gemini", nil, []string{"some unrelated injected hint"})
+	if err != nil {
+		t.Fatalf("genuine AddInsightWith: %v", err)
+	}
+	if added {
+		t.Fatalf("genuine re-derivation added a duplicate; want reinforcement")
+	}
+	got, _ = m.Insights()
+	if got[0].Hits != baseHits+1 || got[0].Salience <= baseSal {
+		t.Fatalf("genuine re-derivation did not reinforce: hits=%d salience=%v", got[0].Hits, got[0].Salience)
+	}
+
+	// A brand-new text that was itself injected is recorded but flagged.
+	const fresh = "config parsing is in internal/config loader"
+	added, err = m.AddInsightWith(fresh, "claude", "opus-4-8", nil, []string{fresh})
+	if err != nil || !added {
+		t.Fatalf("fresh parroted AddInsightWith: added=%v err=%v (want true, nil)", added, err)
+	}
+	got, _ = m.Insights()
+	var freshIn *Insight
+	for i := range got {
+		if got[i].Text == fresh {
+			freshIn = &got[i]
+		}
+	}
+	if freshIn == nil {
+		t.Fatalf("fresh parroted insight not recorded")
+	}
+	if !freshIn.DerivedFromInjected {
+		t.Fatalf("fresh parroted insight DerivedFromInjected=false, want true")
+	}
+	if freshIn.Salience != baseSalience {
+		t.Fatalf("fresh parroted insight salience=%v, want base %v", freshIn.Salience, baseSalience)
+	}
+}
+
 // TestRetrieveInsightsRelevanceAndTopK: retrieval returns only insights sharing
 // terms with the task, ranked, capped at k. An unrelated task returns nothing.
 func TestRetrieveInsightsRelevanceAndTopK(t *testing.T) {

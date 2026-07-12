@@ -88,6 +88,13 @@ type dispatchMem interface {
 	// satisfies both.
 	RetrieveInsights(task string, k int) ([]memory.Insight, error)
 	AddInsight(text, agent, model string, tags []string) (bool, error)
+	// AddInsightWith is AddInsight plus the injected-text guard: notes that
+	// merely parrot an insight injected into THIS dispatch's prompt must not
+	// reinforce it (see memory.SharedMemory.AddInsightWith). Dispatch passes the
+	// texts it injected so a rediscovery that is really just an echo can be
+	// recorded but never bootstrap its own confidence. *memory.SharedMemory
+	// satisfies this.
+	AddInsightWith(text, agent, model string, tags []string, injected []string) (bool, error)
 }
 
 // Orchestrator distributes tasks to agents, sharing context via shared memory.
@@ -1084,8 +1091,17 @@ func (o *Orchestrator) runAuthor(task, agentName, priority, model, guidance, eff
 	// brief. Read-only and bounded (top-K); a store with no relevant insight
 	// injects nothing, keeping the prompt byte-identical to the pre-insight
 	// behavior. Best-effort: a retrieval error never blocks the dispatch.
+	// injectedInsightTexts captures the exact insight texts injected into this
+	// dispatch's prompt so that, when the author's notes are contributed back to
+	// the insight layer, a note that merely parrots an injected hint does not
+	// reinforce it (see the AddInsightWith call below). Empty when nothing was
+	// injected, in which case the feedback path stays byte-identical.
+	var injectedInsightTexts []string
 	if insights, ierr := mem.RetrieveInsights(task, insightInjectK); ierr == nil && len(insights) > 0 {
 		sysPrompt += renderInsightBrief(insights)
+		for _, in := range insights {
+			injectedInsightTexts = append(injectedInsightTexts, in.Text)
+		}
 	}
 
 	// The actual process working directory — needed so agy (which, unlike
@@ -1227,7 +1243,7 @@ func (o *Orchestrator) runAuthor(task, agentName, priority, model, guidance, eff
 			// normalized text (re-derivation reinforces, not duplicates).
 			// Best-effort: the note is already durable in the audit trail, so an
 			// insight failure records a note and never fails the dispatch.
-			if _, ierr := mem.AddInsight(up.Note, route.Agent, route.Model, taskTags(task)); ierr != nil {
+			if _, ierr := mem.AddInsightWith(up.Note, route.Agent, route.Model, taskTags(task), injectedInsightTexts); ierr != nil {
 				_ = mem.AppendNote("orchestrator", fmt.Sprintf("insight add failed for %s: %v", key, ierr))
 			}
 		}

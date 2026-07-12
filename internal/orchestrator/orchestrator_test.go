@@ -87,6 +87,9 @@ func (s *spyMem) RetrieveInsights(task string, k int) ([]memory.Insight, error) 
 func (s *spyMem) AddInsight(text, agent, model string, tags []string) (bool, error) {
 	return s.inner.AddInsight(text, agent, model, tags)
 }
+func (s *spyMem) AddInsightWith(text, agent, model string, tags []string, injected []string) (bool, error) {
+	return s.inner.AddInsightWith(text, agent, model, tags, injected)
+}
 
 // Read/All are present only so a bug that pulled content would register. They
 // are never expected to be called during Dispatch.
@@ -238,6 +241,76 @@ func TestDispatch(t *testing.T) {
 	}
 	if !foundZ {
 		t.Fatalf("keyed update value Z not persisted: %v", all)
+	}
+}
+
+// TestDispatchInjectedInsightNotSelfReinforced guards the self-reinforcement
+// loop: an insight injected into a dispatch's prompt and then parroted back in
+// the author's memory_updates must NOT be reinforced (it is not an independent
+// rediscovery), while a genuinely new note is recorded as usual.
+func TestDispatchInjectedInsightNotSelfReinforced(t *testing.T) {
+	const task = "refactor the concurrent scheduler to fix the race condition and deadlock"
+	// insightX shares terms with the task (scheduler/race/condition) so
+	// RetrieveInsights injects it into the prompt.
+	const insightX = "the scheduler uses a lock-free ring buffer to resolve the race condition"
+	const freshNote = "caching layer was migrated to an LRU eviction policy"
+
+	// Canned response: the author parrots the injected insight verbatim AND adds a
+	// genuinely new note.
+	canned := `did the work.
+
+{"status":"ok","result":"done","summary":"fixed it","memory_updates":[{"note":"` + insightX + `"},{"note":"` + freshNote + `"}]}`
+
+	mem := memory.New(t.TempDir())
+	// Seed insightX so the dispatch will retrieve+inject it.
+	if added, err := mem.AddInsight(insightX, "codex", "gpt-5.5", nil); err != nil || !added {
+		t.Fatalf("seed AddInsight: added=%v err=%v (want true, nil)", added, err)
+	}
+	before, _ := mem.Insights()
+	if len(before) != 1 {
+		t.Fatalf("seed count = %d, want 1", len(before))
+	}
+	baseHits, baseSal := before[0].Hits, before[0].Salience
+
+	mgr, _ := newFakeManager(0)
+	var argv []string
+	o := New(mem, mgr)
+	o.GetAdapter = func(name string) (agent.Adapter, error) {
+		return newRecordingAdapter(t, name, canned, &argv), nil
+	}
+
+	if _, err := o.Dispatch(task, "", ""); err != nil {
+		t.Fatalf("Dispatch error: %v", err)
+	}
+
+	got, err := mem.Insights()
+	if err != nil {
+		t.Fatalf("Insights: %v", err)
+	}
+
+	var xIn, freshIn *memory.Insight
+	for i := range got {
+		switch got[i].Text {
+		case insightX:
+			xIn = &got[i]
+		case freshNote:
+			freshIn = &got[i]
+		}
+	}
+	if xIn == nil {
+		t.Fatalf("injected insight X vanished from the store: %+v", got)
+	}
+	// The parroted injected insight must be frozen — no self-reinforcement.
+	if xIn.Hits != baseHits || xIn.Salience != baseSal {
+		t.Fatalf("injected insight was self-reinforced: hits %d->%d salience %v->%v (want frozen)",
+			baseHits, xIn.Hits, baseSal, xIn.Salience)
+	}
+	// The genuinely new note was recorded normally.
+	if freshIn == nil {
+		t.Fatalf("genuinely new note %q was not recorded as an insight: %+v", freshNote, got)
+	}
+	if freshIn.DerivedFromInjected {
+		t.Fatalf("new note flagged DerivedFromInjected; it was not injected")
 	}
 }
 

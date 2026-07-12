@@ -49,6 +49,15 @@ type Insight struct {
 	Tags      []string `json:"tags,omitempty"`
 	CreatedTS float64  `json:"created_ts"`
 	UpdatedTS float64  `json:"updated_ts"`
+	// Type is an optional caller hint about the kind of learning
+	// (fact|command|hypothesis|preference); "" when unclassified.
+	Type string `json:"type,omitempty"`
+	// DerivedFromInjected marks an insight first recorded as a parroted copy of a
+	// text that was itself INJECTED into the contributing agent's prompt. Such an
+	// insight is not an independent rediscovery, so it is recorded but can never
+	// REINFORCE (see AddInsightWith) — this breaks the self-reinforcement loop
+	// where an injected insight bootstraps its own confidence by being echoed back.
+	DerivedFromInjected bool `json:"derived_from_injected,omitempty"`
 }
 
 // toMap renders an Insight as the generic map that load()/save() round-trips
@@ -71,6 +80,12 @@ func (in Insight) toMap() map[string]any {
 			tags[i] = t
 		}
 		m["tags"] = tags
+	}
+	if in.Type != "" {
+		m["type"] = in.Type
+	}
+	if in.DerivedFromInjected {
+		m["derived_from_injected"] = true
 	}
 	return m
 }
@@ -104,6 +119,8 @@ func insightFromMap(v any) (Insight, bool) {
 			}
 		}
 	}
+	in.Type, _ = m["type"].(string)
+	in.DerivedFromInjected, _ = m["derived_from_injected"].(bool)
 	return in, true
 }
 
@@ -209,7 +226,29 @@ func tokenSet(s string) map[string]bool {
 // UpdatedTS advanced, and any new tags merged) and returns added=false; a novel
 // learning is appended with baseSalience and returns added=true. An empty/blank
 // text is a no-op (added=false, nil error).
+//
+// It delegates to AddInsightWith with no injected texts, which is byte-identical
+// to the historical behavior.
 func (m *SharedMemory) AddInsight(text, agent, model string, tags []string) (bool, error) {
+	return m.AddInsightWith(text, agent, model, tags, nil)
+}
+
+// AddInsightWith behaves EXACTLY like AddInsight except it defends against the
+// self-reinforcement loop: injected holds the texts that were injected into the
+// contributing agent's prompt for this task. If text (normalized) matches one of
+// those injected texts, this contribution is NOT an independent rediscovery —
+// the agent merely parroted a hint it was given — so it must never REINFORCE:
+//   - an existing matching insight is left untouched (no Hits++/salience bump),
+//     returning added=false; and
+//   - if no existing insight matches, it is appended at baseSalience with
+//     DerivedFromInjected=true so the parroted origin is recorded, but a later
+//     genuine (non-injected) rediscovery is still what reinforces it.
+//
+// injected==nil (or empty) means "nothing was injected", so no text can be
+// parroted and behavior is identical to the historical AddInsight. Each injected
+// string is normalized with the same normalizeText used for dedup so the match
+// is on meaningful terms, not surface formatting.
+func (m *SharedMemory) AddInsightWith(text, agent, model string, tags []string, injected []string) (bool, error) {
 	if strings.TrimSpace(text) == "" {
 		return false, nil
 	}
@@ -225,9 +264,24 @@ func (m *SharedMemory) AddInsight(text, agent, model string, tags []string) (boo
 	insights := loadInsights(data)
 
 	norm := normalizeText(text)
+
+	// Was this text merely parroted back from an injected hint? If so it is not
+	// an independent signal and must not reinforce.
+	parroted := false
+	for _, inj := range injected {
+		if normalizeText(inj) == norm {
+			parroted = true
+			break
+		}
+	}
+
 	now := float64(time.Now().Unix())
 	for i := range insights {
 		if normalizeText(insights[i].Text) == norm {
+			if parroted {
+				// Parroted injected text: record nothing, reinforce nothing.
+				return false, nil
+			}
 			// Reinforce: independent rediscovery raises salience/recency.
 			insights[i].Hits++
 			insights[i].Salience += reinforceBump
@@ -242,15 +296,16 @@ func (m *SharedMemory) AddInsight(text, agent, model string, tags []string) (boo
 	}
 
 	insights = append(insights, Insight{
-		ID:        nextInsightID(insights),
-		Text:      strings.TrimSpace(text),
-		Agent:     agent,
-		Model:     model,
-		Salience:  baseSalience,
-		Hits:      1,
-		Tags:      dedupTags(tags),
-		CreatedTS: now,
-		UpdatedTS: now,
+		ID:                  nextInsightID(insights),
+		Text:                strings.TrimSpace(text),
+		Agent:               agent,
+		Model:               model,
+		Salience:            baseSalience,
+		Hits:                1,
+		Tags:                dedupTags(tags),
+		CreatedTS:           now,
+		UpdatedTS:           now,
+		DerivedFromInjected: parroted,
 	})
 	storeInsights(data, insights)
 	return true, m.save(data)
