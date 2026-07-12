@@ -2974,3 +2974,102 @@ func TestDispatchIsolated(t *testing.T) {
 		}
 	})
 }
+
+// TestDispatchAuto proves the isolate-aware router only CHOOSES between the two
+// existing paths plus a git guard: in a git repo isolate=true routes to
+// DispatchIsolated (same contract as TestDispatchIsolated); in a NON-git dir it
+// falls back in place and marks Isolation.Skipped; isolate=false runs in place
+// with no Isolation record.
+func TestDispatchAuto(t *testing.T) {
+	fixedRoute := func(task, agentName, priority, model string) (routing.Selection, error) {
+		return routing.Selection{Agent: "claude", Model: "m", Difficulty: "normal"}, nil
+	}
+
+	t.Run("isolate in a git repo routes to isolation: committed to branch, base clean", func(t *testing.T) {
+		repo := newIsolateRepo(t)
+		mem := memory.New(t.TempDir())
+		mgr, _ := newFakeManager(0)
+		o := New(mem, mgr)
+		o.Route = fixedRoute
+		ad := &workdirAdapter{name: "claude", writeGo: true}
+		o.GetAdapter = func(name string) (agent.Adapter, error) { return ad, nil }
+
+		res, err := o.DispatchAuto("add a helper", "claude", "", "", "", "", false, nil, repo, true)
+		if err != nil {
+			t.Fatalf("DispatchAuto error: %v", err)
+		}
+		if res.Isolation == nil || !res.Isolation.Committed {
+			t.Fatalf("expected Isolation.Committed=true, got %+v", res.Isolation)
+		}
+		if res.Isolation.Skipped {
+			t.Fatalf("Skipped must be false when isolation actually ran, got %+v", res.Isolation)
+		}
+		branch := res.Isolation.Branch
+		if branch == "" {
+			t.Fatalf("expected a non-empty Isolation.Branch on the success path")
+		}
+		if _, err := gitCmd(repo, "rev-parse", "--verify", branch); err != nil {
+			t.Fatalf("branch %q should exist: %v", branch, err)
+		}
+		// The base working tree is untouched: no marker.go and a clean status.
+		if _, err := os.Stat(filepath.Join(repo, "marker.go")); !os.IsNotExist(err) {
+			t.Fatalf("base tree must NOT contain marker.go (err=%v)", err)
+		}
+		if st, _ := gitCmd(repo, "status", "--porcelain"); st != "" {
+			t.Fatalf("base tree must be clean, got status:\n%s", st)
+		}
+	})
+
+	t.Run("isolate in a NON-git dir falls back in place, marks Skipped", func(t *testing.T) {
+		dir := t.TempDir() // not a git repo
+		mem := memory.New(t.TempDir())
+		mgr, _ := newFakeManager(0)
+		o := New(mem, mgr)
+		o.Route = fixedRoute
+		ad := &workdirAdapter{name: "claude", writeGo: true}
+		o.GetAdapter = func(name string) (agent.Adapter, error) { return ad, nil }
+
+		res, err := o.DispatchAuto("add a helper", "claude", "", "", "", "", false, nil, dir, true)
+		if err != nil {
+			t.Fatalf("DispatchAuto error: %v", err)
+		}
+		if res.Isolation == nil || !res.Isolation.Skipped {
+			t.Fatalf("expected Isolation.Skipped=true on the non-git fallback, got %+v", res.Isolation)
+		}
+		if res.Isolation.Reason == "" {
+			t.Fatalf("expected a non-empty Isolation.Reason explaining the skip")
+		}
+		if res.Isolation.Committed || res.Isolation.Branch != "" {
+			t.Fatalf("fallback must not commit or create a branch, got %+v", res.Isolation)
+		}
+		// The file was written IN PLACE in the workdir (in-place path).
+		if _, err := os.Stat(filepath.Join(dir, "marker.go")); err != nil {
+			t.Fatalf("in-place fallback must write marker.go into the workdir: %v", err)
+		}
+		// No worktree scaffolding was created under the non-repo dir.
+		if _, err := os.Stat(filepath.Join(dir, ".jindo", "wt")); !os.IsNotExist(err) {
+			t.Fatalf(".jindo/wt must not be created on the fallback path (err=%v)", err)
+		}
+	})
+
+	t.Run("isolate=false runs in place with no Isolation record", func(t *testing.T) {
+		dir := t.TempDir()
+		mem := memory.New(t.TempDir())
+		mgr, _ := newFakeManager(0)
+		o := New(mem, mgr)
+		o.Route = fixedRoute
+		ad := &workdirAdapter{name: "claude", writeGo: true}
+		o.GetAdapter = func(name string) (agent.Adapter, error) { return ad, nil }
+
+		res, err := o.DispatchAuto("add a helper", "claude", "", "", "", "", false, nil, dir, false)
+		if err != nil {
+			t.Fatalf("DispatchAuto error: %v", err)
+		}
+		if res.Isolation != nil {
+			t.Fatalf("expected Isolation==nil for isolate=false, got %+v", res.Isolation)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "marker.go")); err != nil {
+			t.Fatalf("in-place dispatch must write marker.go into the workdir: %v", err)
+		}
+	})
+}

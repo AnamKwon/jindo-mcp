@@ -211,6 +211,14 @@ type Isolation struct {
 	Branch       string `json:"branch,omitempty"`
 	Committed    bool   `json:"committed"`
 	Merged       bool   `json:"merged"`
+	// Skipped is true only when isolation was REQUESTED (isolate default-on) but
+	// could not be applied — the run happened IN PLACE instead. It stays false on
+	// the DispatchIsolated success/no-change paths (which genuinely isolated). Set
+	// by DispatchAuto when the workdir is not a git repository.
+	Skipped bool `json:"skipped,omitempty"`
+	// Reason explains why isolation was skipped (e.g. workdir is not a git repo);
+	// non-empty only when Skipped is true.
+	Reason string `json:"reason,omitempty"`
 }
 
 // New builds an Orchestrator over the given shared memory and tmux manager,
@@ -590,6 +598,56 @@ func (o *Orchestrator) DispatchIsolated(task, agentName, priority, model, guidan
 	o.discardWorktree(repoRoot, worktreePath, branch)
 	res.Isolation = &Isolation{Committed: false, Merged: false}
 	return res, nil
+}
+
+// DispatchAuto is the isolate-aware entry point the MCP dispatch tools use. It
+// only CHOOSES between the two existing execution paths (DispatchModel in place
+// vs DispatchIsolated in an ephemeral worktree) plus a git guard with a safe
+// fallback; it adds no dispatch behavior of its own.
+//
+//   - isolate == false: run in place via DispatchModel, byte-identical to today.
+//   - isolate == true AND the workdir is inside a git repository: run isolated
+//     via DispatchIsolated (worktree + commit to a jindo/iso-* branch for the
+//     HOST to merge), so an aborted/mis-routed write never leaves partial changes
+//     in the caller's tree.
+//   - isolate == true but the workdir is NOT a git repository (or git errors):
+//     FALL BACK to DispatchModel (in place) rather than erroring — there is no
+//     repo to branch off — and mark the returned Result.Isolation Skipped with a
+//     Reason so the host learns the run was not actually isolated.
+//
+// The effective workdir is workdir when non-empty, else os.Getwd() (matching the
+// in-place path's own default). The git check reuses gitCmd (no shell), mirroring
+// DispatchIsolated's own repo probe.
+func (o *Orchestrator) DispatchAuto(task, agentName, priority, model, guidance, effort string, review bool, verify []string, workdir string, isolate bool) (Result, error) {
+	if !isolate {
+		return o.DispatchModel(task, agentName, priority, model, guidance, effort, review, verify, workdir)
+	}
+
+	// Resolve the directory the git guard inspects: the explicit workdir, else
+	// jindo's own cwd (the same directory the in-place path would run in).
+	dir := workdir
+	if dir == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			dir = cwd
+		}
+	}
+
+	// Isolation needs a git repo to branch off. If the workdir is not inside one
+	// (or git errors), run in place instead of refusing, and record the skip.
+	if _, err := gitCmd(dir, "rev-parse", "--show-toplevel"); err != nil {
+		res, derr := o.DispatchModel(task, agentName, priority, model, guidance, effort, review, verify, workdir)
+		if derr != nil {
+			return res, derr
+		}
+		res.Isolation = &Isolation{Skipped: true, Reason: "workdir is not a git repository; ran in place"}
+		_ = o.dispatchStore().AppendNote("orchestrator", fmt.Sprintf("isolate: skipped for %q (not a git repository); ran in place", dir))
+		return res, nil
+	}
+
+	// Pass the RESOLVED dir (workdir, else cwd): identical to the original workdir
+	// when one was given, and it lets isolation run in cwd — which the guard just
+	// confirmed is a repo — instead of DispatchIsolated refusing an empty workdir.
+	return o.DispatchIsolated(task, agentName, priority, model, guidance, effort, review, verify, dir)
 }
 
 // gitCmd runs a git subcommand in dir via exec.Command (never a shell, mirroring

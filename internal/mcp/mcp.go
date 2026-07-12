@@ -317,10 +317,11 @@ var workdirSchemaProp = map[string]any{
 
 // isolateSchemaProp is the shared JSON Schema for the optional "isolate" argument
 // on both dispatch and dispatch_async. Defined once so the two tools advertise an
-// identical shape.
+// identical shape. The type stays boolean and the argument stays optional: OMITTING
+// it means default-on (isolate), passing false forces the legacy in-place write.
 var isolateSchemaProp = map[string]any{
 	"type":        "boolean",
-	"description": "Run the dispatch inside an ephemeral git worktree branched off HEAD; on success the changes are committed to a returned branch and the worktree is removed (the caller's working tree is never modified by jindo — the HOST merges the returned branch); on failure the worktree is discarded so the caller's tree stays clean. Requires workdir to be inside a git repository. Recommended together with dispatch_async for long write tasks so a host idle-timeout abort can never leave partial changes.",
+	"description": "Default TRUE for write dispatches: the run executes in an ephemeral git worktree and commits changes to a jindo/iso-<token> branch for the HOST to merge, so an aborted/mis-routed write never leaves partial changes in the caller's tree. Pass false to write in place (legacy). Isolation is skipped automatically (runs in place, result.isolation.skipped=true) when workdir is not a git repository.",
 }
 
 // validEfforts is the closed set of reasoning-effort levels the dispatch tools
@@ -667,24 +668,27 @@ type dispatchArgs struct {
 	Review   bool     `json:"review"`
 	Verify   []string `json:"verify"`
 	Workdir  string   `json:"workdir"`
-	Isolate  bool     `json:"isolate"`
+	// Isolate is a THREE-state opt-out of the default-on ephemeral-worktree mode
+	// for write dispatches: nil (omitted) uses the DEFAULT (isolate ON), false
+	// forces in-place (legacy), true forces isolate. Decoded to a concrete
+	// isolate bool in runDispatch as (in.Isolate == nil || *in.Isolate).
+	Isolate *bool `json:"isolate"`
 }
 
-// runDispatch executes in against the orchestrator (via DispatchModel, which
+// runDispatch executes in against the orchestrator (via DispatchAuto, which
 // honors the optional model pin, the optional task-specific guidance, and the
 // Review flag) and builds the JSON-able payload map both the sync and async
-// tools return on success. When in.Isolate is set, the run is routed through
-// DispatchIsolated instead so it executes in an ephemeral git worktree and never
-// leaves partial changes in the caller's working tree (see DispatchIsolated);
-// everything else about the payload is unchanged.
+// tools return on success. Isolation is DEFAULT-ON for write dispatches: the run
+// executes in an ephemeral git worktree and commits changes to a branch for the
+// HOST to merge, so an aborted/mis-routed write never leaves partial changes in
+// the caller's working tree (see DispatchAuto/DispatchIsolated). in.Isolate is a
+// three-state opt-out — nil means default (on), false forces in-place (legacy),
+// true forces isolate — resolved here to a concrete isolate flag. When the
+// workdir is not a git repo, DispatchAuto falls back to in-place and marks the
+// skip; everything else about the payload is unchanged.
 func runDispatch(o *orchestrator.Orchestrator, in dispatchArgs) (map[string]any, error) {
-	var res orchestrator.Result
-	var err error
-	if in.Isolate {
-		res, err = o.DispatchIsolated(in.Task, in.Agent, in.Priority, in.Model, in.Guidance, in.Effort, in.Review, in.Verify, in.Workdir)
-	} else {
-		res, err = o.DispatchModel(in.Task, in.Agent, in.Priority, in.Model, in.Guidance, in.Effort, in.Review, in.Verify, in.Workdir)
-	}
+	isolate := in.Isolate == nil || *in.Isolate
+	res, err := o.DispatchAuto(in.Task, in.Agent, in.Priority, in.Model, in.Guidance, in.Effort, in.Review, in.Verify, in.Workdir, isolate)
 	if err != nil {
 		return nil, err
 	}
@@ -718,10 +722,11 @@ func runDispatch(o *orchestrator.Orchestrator, in dispatchArgs) (map[string]any,
 	if len(res.Files) > 0 {
 		payload["files"] = res.Files
 	}
-	// Surface the ephemeral-worktree outcome only when isolate mode ran, so the
-	// host learns the branch it must merge (on success) or that the worktree was
-	// discarded (on failure/no-change). Omitted for a non-isolate dispatch, keeping
-	// the legacy payload shape.
+	// Surface the ephemeral-worktree outcome whenever isolation was involved, so the
+	// host learns the branch it must merge (on success), that the worktree was
+	// discarded (on failure/no-change), or that isolation was requested but skipped
+	// and the run happened in place (skipped=true with a reason). Omitted for a
+	// forced in-place (isolate:false) dispatch, keeping the legacy payload shape.
 	if res.Isolation != nil {
 		payload["isolation"] = res.Isolation
 	}

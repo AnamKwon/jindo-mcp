@@ -189,6 +189,89 @@ func TestToolsCallDispatch(t *testing.T) {
 	}
 }
 
+// initGitRepo creates a temp git repository with one commit and returns its path.
+// Used by the isolate-default-on dispatch test so DispatchAuto's git guard finds a
+// real repo to branch off.
+func initGitRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	run := func(args ...string) {
+		c := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init")
+	run("config", "user.email", "test@test.com")
+	run("config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(repo, "seed.txt"), []byte("seed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-m", "init")
+	return repo
+}
+
+// TestToolsCallDispatchIsolateDefaultsOn proves the MCP-level default: omitting
+// the isolate argument routes a write dispatch through isolation for a git
+// workdir (isolation payload present, base tree untouched), while isolate:false
+// forces the legacy in-place path (no isolation payload). The canned adapter
+// writes no files, so the isolated run takes the no-change branch and discards
+// its worktree — enough to prove routing without depending on real file writes.
+func TestToolsCallDispatchIsolateDefaultsOn(t *testing.T) {
+	repo := initGitRepo(t)
+	gitStatus := func() string {
+		c := exec.Command("git", "-C", repo, "status", "--porcelain")
+		out, err := c.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git status: %v: %s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	t.Run("omitted isolate routes to isolation for a git workdir", func(t *testing.T) {
+		s, _ := newTestServer(t, "canned")
+		resp := call(t, s,
+			`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"dispatch","arguments":{"task":"add a comment","workdir":"`+repo+`"}}}`)
+		if resp.Error != nil {
+			t.Fatalf("dispatch returned error: %+v", resp.Error)
+		}
+		text := contentText(t, resp)
+		var res struct {
+			Isolation *orchestrator.Isolation `json:"isolation"`
+		}
+		if err := json.Unmarshal([]byte(text), &res); err != nil {
+			t.Fatalf("dispatch content not JSON: %v (text=%s)", err, text)
+		}
+		if res.Isolation == nil {
+			t.Fatalf("expected an isolation payload when isolate defaults on for a git workdir; got: %s", text)
+		}
+		if res.Isolation.Skipped {
+			t.Fatalf("isolation must not be skipped for a real git repo; got %+v", res.Isolation)
+		}
+		// The caller's base tree was never written by the isolated run.
+		if _, err := os.Stat(filepath.Join(repo, "marker.go")); !os.IsNotExist(err) {
+			t.Fatalf("base tree must NOT contain marker.go (err=%v)", err)
+		}
+		if st := gitStatus(); st != "" {
+			t.Fatalf("base tree must be clean after isolation, got:\n%s", st)
+		}
+	})
+
+	t.Run("isolate:false runs in place with no isolation payload", func(t *testing.T) {
+		s, _ := newTestServer(t, "canned")
+		resp := call(t, s,
+			`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"dispatch","arguments":{"task":"add a comment","workdir":"`+repo+`","isolate":false}}}`)
+		if resp.Error != nil {
+			t.Fatalf("dispatch returned error: %+v", resp.Error)
+		}
+		text := contentText(t, resp)
+		if strings.Contains(text, `"isolation"`) {
+			t.Fatalf("isolate:false must not surface an isolation payload; got: %s", text)
+		}
+	})
+}
+
 // TestToolsCallDispatchStatusSummary verifies that when the adapter returns
 // contract-following JSON stdout (status/result/summary/memory_updates), the
 // dispatch tool's content surfaces status and summary alongside the existing
@@ -1060,12 +1143,15 @@ func TestToolsCallDispatchVerifyPassingInPayload(t *testing.T) {
 	}
 }
 
-// TestToolsCallDispatchFilesInPayload verifies that when a dispatch actually
-// changes a file on disk (in a git repo), the resulting payload carries a
-// "files" manifest entry for it. The fake adapter's Exec writes a file into the
+// TestToolsCallDispatchFilesInPayload verifies that when an IN-PLACE dispatch
+// actually changes a file on disk (in a git repo), the resulting payload carries
+// a "files" manifest entry for it. The fake adapter's Exec writes a file into the
 // process cwd (which the test temporarily points at a scratch git repo) before
 // returning the canned author response, simulating what a real CLI dispatch
-// would do.
+// would do. isolate:false is passed explicitly: isolation now defaults on, and
+// an isolated run would snapshot the ephemeral worktree (where the fake never
+// writes) rather than the base repo, so this legacy in-place changed-files
+// contract is only exercised on the DispatchModel path.
 func TestToolsCallDispatchFilesInPayload(t *testing.T) {
 	repo := t.TempDir()
 	runGitMcp(t, repo, "init")
@@ -1103,7 +1189,7 @@ func TestToolsCallDispatchFilesInPayload(t *testing.T) {
 	}
 
 	resp := call(t, s,
-		`{"jsonrpc":"2.0","id":53,"method":"tools/call","params":{"name":"dispatch","arguments":{"task":"add a file"}}}`)
+		`{"jsonrpc":"2.0","id":53,"method":"tools/call","params":{"name":"dispatch","arguments":{"task":"add a file","isolate":false}}}`)
 	if resp.Error != nil {
 		t.Fatalf("dispatch returned error: %+v", resp.Error)
 	}
