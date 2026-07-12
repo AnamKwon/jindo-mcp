@@ -1615,6 +1615,125 @@ func TestDispatchWithReviewStillCritical(t *testing.T) {
 	}
 }
 
+// TestDispatchReviewStatusTrust pins the EXPLICIT review-trust surface
+// (Result.Review / ReviewStatus): a host must be able to tell whether the review
+// actually completed and gated, so it cannot mistake review=true for a passed
+// quality gate. It covers the three review-path outcomes plus the review-off case.
+func TestDispatchReviewStatusTrust(t *testing.T) {
+	// (a) every reviewer errored (unparseable review) → the review did NOT complete:
+	// Completed=false, GatePassed=false, Confidence="unverified", status still "ok".
+	t.Run("all reviewers errored", func(t *testing.T) {
+		mem := memory.New(t.TempDir())
+		mgr, _ := newFakeManager(0)
+		calls := 0
+		o := New(mem, mgr)
+		o.GetAdapter = scriptedGetAdapter(map[string][]string{
+			"claude": {cannedJSON},
+			"agy":    {"no json verdict here"},
+			"codex":  {"also unparseable"},
+		}, &calls)
+
+		got, err := o.DispatchWithReview(reviewTask, "claude", "")
+		if err != nil {
+			t.Fatalf("DispatchWithReview error: %v", err)
+		}
+		if got.Review == nil {
+			t.Fatalf("Result.Review is nil, want non-nil on the review path")
+		}
+		if !got.Review.Requested {
+			t.Fatalf("Review.Requested = false, want true")
+		}
+		if got.Review.Completed {
+			t.Fatalf("Review.Completed = true, want false (all reviewers errored)")
+		}
+		if got.Review.GatePassed {
+			t.Fatalf("Review.GatePassed = true, want false (review did not complete)")
+		}
+		if got.Review.Confidence != "unverified" {
+			t.Fatalf("Review.Confidence = %q, want unverified", got.Review.Confidence)
+		}
+	})
+
+	// (b) clean review (all approve) → Completed=true, GatePassed=true,
+	// Confidence="reviewed".
+	t.Run("clean review", func(t *testing.T) {
+		mem := memory.New(t.TempDir())
+		mgr, _ := newFakeManager(0)
+		calls := 0
+		o := New(mem, mgr)
+		o.GetAdapter = scriptedGetAdapter(map[string][]string{
+			"claude": {cannedJSON},
+			"agy":    {reviewApproved},
+			"codex":  {reviewApproved},
+		}, &calls)
+
+		got, err := o.DispatchWithReview(reviewTask, "claude", "")
+		if err != nil {
+			t.Fatalf("DispatchWithReview error: %v", err)
+		}
+		if got.Review == nil {
+			t.Fatalf("Result.Review is nil, want non-nil on the review path")
+		}
+		if !got.Review.Completed || !got.Review.GatePassed {
+			t.Fatalf("Review = %+v, want Completed=true GatePassed=true", got.Review)
+		}
+		if got.Review.Confidence != "reviewed" {
+			t.Fatalf("Review.Confidence = %q, want reviewed", got.Review.Confidence)
+		}
+	})
+
+	// (c) unresolved critical → status "review_failed", GatePassed=false,
+	// Confidence="review_failed" (but Completed=true — a real verdict came back).
+	t.Run("unresolved critical", func(t *testing.T) {
+		mem := memory.New(t.TempDir())
+		mgr, _ := newFakeManager(0)
+		calls := 0
+		o := New(mem, mgr)
+		o.GetAdapter = scriptedGetAdapter(map[string][]string{
+			"claude": {cannedJSON, cannedJSON},
+			"agy":    {reviewApproved, reviewApproved},
+			"codex":  {reviewCritical, reviewCritical},
+		}, &calls)
+
+		got, err := o.DispatchWithReview(reviewTask, "claude", "")
+		if err != nil {
+			t.Fatalf("DispatchWithReview error: %v", err)
+		}
+		if got.Status != "review_failed" {
+			t.Fatalf("status = %q, want review_failed", got.Status)
+		}
+		if got.Review == nil {
+			t.Fatalf("Result.Review is nil, want non-nil on the review path")
+		}
+		if !got.Review.Completed {
+			t.Fatalf("Review.Completed = false, want true (a real verdict came back)")
+		}
+		if got.Review.GatePassed {
+			t.Fatalf("Review.GatePassed = true, want false (unresolved critical)")
+		}
+		if got.Review.Confidence != "review_failed" {
+			t.Fatalf("Review.Confidence = %q, want review_failed", got.Review.Confidence)
+		}
+	})
+
+	// (d) review-off dispatch → Result.Review is nil (legacy shape preserved).
+	t.Run("review off leaves Review nil", func(t *testing.T) {
+		mem := memory.New(t.TempDir())
+		mgr, _ := newFakeManager(0)
+		calls := 0
+		o := New(mem, mgr)
+		o.GetAdapter = scriptedGetAdapter(map[string][]string{"claude": {cannedJSON}}, &calls)
+
+		res, err := o.Dispatch(reviewTask, "claude", "")
+		if err != nil {
+			t.Fatalf("Dispatch error: %v", err)
+		}
+		if res.Review != nil {
+			t.Fatalf("review-off dispatch: Result.Review = %+v, want nil", res.Review)
+		}
+	})
+}
+
 // TestDispatchNoReviewLogLineHasNoReviewKey: (iv) the review-OFF path (plain
 // Dispatch) writes a dispatch.log line with NO "review" key — the backward-compat
 // byte invariant — and never invokes a reviewer.

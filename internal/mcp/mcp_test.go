@@ -681,6 +681,58 @@ func TestToolsCallDispatchReviewExposesVerdictInPayload(t *testing.T) {
 	}
 }
 
+// TestToolsCallDispatchReviewStatusInPayload pins the EXPLICIT review-trust
+// surface: a review:true dispatch's RETURNED payload must carry a "review_status"
+// object {requested, completed, gate_passed, confidence} so the host cannot
+// mistake review:true for a passed quality gate. With this fixture every reviewer
+// returns an unparseable review (errored), so the review does NOT complete:
+// completed=false, gate_passed=false, confidence="unverified". review:false must
+// omit the review_status key entirely (legacy payload shape).
+func TestToolsCallDispatchReviewStatusInPayload(t *testing.T) {
+	s, _ := newTestServer(t, "canned-with-review")
+
+	// review:true -> payload carries review_status with the trust flags.
+	resp := call(t, s,
+		`{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"dispatch","arguments":{"task":"add a comment","review":true}}}`)
+	if resp.Error != nil {
+		t.Fatalf("dispatch returned error: %+v", resp.Error)
+	}
+	var withReview struct {
+		ReviewStatus *struct {
+			Requested  bool   `json:"requested"`
+			Completed  bool   `json:"completed"`
+			GatePassed bool   `json:"gate_passed"`
+			Confidence string `json:"confidence"`
+		} `json:"review_status"`
+	}
+	if err := json.Unmarshal([]byte(contentText(t, resp)), &withReview); err != nil {
+		t.Fatalf("dispatch content not JSON: %v", err)
+	}
+	if withReview.ReviewStatus == nil {
+		t.Fatalf("review:true payload missing review_status: %s", contentText(t, resp))
+	}
+	if !withReview.ReviewStatus.Requested {
+		t.Fatalf("review_status.requested = false, want true")
+	}
+	if withReview.ReviewStatus.Completed || withReview.ReviewStatus.GatePassed {
+		t.Fatalf("review_status = %+v, want completed=false gate_passed=false (reviewers errored)", *withReview.ReviewStatus)
+	}
+	if withReview.ReviewStatus.Confidence != "unverified" {
+		t.Fatalf("review_status.confidence = %q, want unverified", withReview.ReviewStatus.Confidence)
+	}
+
+	// review:false (omitted) -> no review_status key in payload.
+	respOff := call(t, s,
+		`{"jsonrpc":"2.0","id":43,"method":"tools/call","params":{"name":"dispatch","arguments":{"task":"add a comment"}}}`)
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(contentText(t, respOff)), &raw); err != nil {
+		t.Fatalf("dispatch content not JSON: %v", err)
+	}
+	if _, has := raw["review_status"]; has {
+		t.Fatalf("review-off payload must omit review_status key: %v", raw)
+	}
+}
+
 // TestToolsCallDispatchAsync verifies dispatch_async returns a job_id and
 // status "running" immediately, without waiting for the background dispatch to
 // finish.

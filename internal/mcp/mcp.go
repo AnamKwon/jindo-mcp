@@ -384,7 +384,7 @@ func tools() []toolDef {
 					"effort":   effortSchemaProp,
 					"review": map[string]any{
 						"type":        "boolean",
-						"description": "Optional opt-in cross-model peer review of the dispatched result. Defaults to false (no review); set true to have a different model review the result and, on a critical finding, trigger one revision round.",
+						"description": "Optional opt-in cross-model peer review of the dispatched result. Defaults to false (no review); set true to have a different model review the result and, on a critical finding, trigger one revision round. Review is ADVISORY — it NEVER fails the dispatch. Do NOT treat review=true (or a returned result) as a passed quality gate: consult result.review_status {requested, completed, gate_passed, confidence} to know whether the review actually completed and gated. Only review_status.gate_passed==true means cross-model review ran to completion with no unresolved critical finding (confidence \"reviewed\"); \"unverified\" means it did not complete and \"review_failed\" means a critical finding survived. The OBJECTIVE verify gate remains the primary signal.",
 					},
 					"verify":  verifySchemaProp,
 					"workdir": workdirSchemaProp,
@@ -411,7 +411,7 @@ func tools() []toolDef {
 					"effort":   effortSchemaProp,
 					"review": map[string]any{
 						"type":        "boolean",
-						"description": "Optional opt-in cross-model peer review of the dispatched result. Defaults to false (no review); set true to have a different model review the result and, on a critical finding, trigger one revision round.",
+						"description": "Optional opt-in cross-model peer review of the dispatched result. Defaults to false (no review); set true to have a different model review the result and, on a critical finding, trigger one revision round. Review is ADVISORY — it NEVER fails the dispatch. Do NOT treat review=true (or a returned result) as a passed quality gate: consult result.review_status {requested, completed, gate_passed, confidence} to know whether the review actually completed and gated. Only review_status.gate_passed==true means cross-model review ran to completion with no unresolved critical finding (confidence \"reviewed\"); \"unverified\" means it did not complete and \"review_failed\" means a critical finding survived. The OBJECTIVE verify gate remains the primary signal.",
 					},
 					"verify":  verifySchemaProp,
 					"workdir": workdirSchemaProp,
@@ -729,6 +729,14 @@ func runDispatch(o *orchestrator.Orchestrator, in dispatchArgs) (map[string]any,
 	// forced in-place (isolate:false) dispatch, keeping the legacy payload shape.
 	if res.Isolation != nil {
 		payload["isolation"] = res.Isolation
+	}
+	// Surface the EXPLICIT review trust status only when review was requested, so
+	// the host gates on whether the review actually completed and passed
+	// (review_status.gate_passed) rather than mistaking review:true — or the mere
+	// presence of reviewer records — for a passed quality gate. Omitted for a
+	// review-off dispatch, keeping the legacy payload shape.
+	if res.Review != nil {
+		payload["review_status"] = res.Review
 	}
 	return payload, nil
 }

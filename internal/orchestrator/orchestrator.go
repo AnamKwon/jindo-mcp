@@ -192,6 +192,40 @@ type Result struct {
 	// by jindo — on success the changes live on Isolation.Branch for the HOST to
 	// merge, and on failure/no-change the worktree and branch are discarded.
 	Isolation *Isolation
+	// Review makes the TRUST STATUS of a cross-model review EXPLICIT so a host
+	// cannot mistake review=true (or a returned result) for a passed quality gate
+	// when the review actually errored or found unresolved critical issues. It is
+	// set ONLY on the review path (nil for a review-OFF dispatch, preserving the
+	// prior Result shape) and answers, independently of Reviews' raw records,
+	// whether the review actually completed and gated. See ReviewStatus.
+	Review *ReviewStatus `json:"review_status,omitempty"`
+}
+
+// ReviewStatus is the explicit trust state of a cross-model review, surfaced so a
+// host gates on whether the review actually RAN and PASSED rather than on the mere
+// presence of review=true or of reviewer records. It is populated only when review
+// was requested; review is ADVISORY and never fails the dispatch, so only
+// GatePassed==true means the review ran to completion with no unresolved critical
+// finding.
+type ReviewStatus struct {
+	// Requested is true whenever this status exists at all: it is set only on the
+	// review path (review=true), so a non-nil ReviewStatus always means review was
+	// asked for.
+	Requested bool `json:"requested"`
+	// Completed is true when at least one reviewer returned a parseable, non-errored
+	// verdict (a real review came back). It is false when every reviewer errored or
+	// produced an unparseable review, or when no cross-model reviewer was available.
+	Completed bool `json:"completed"`
+	// GatePassed is true only when the review both Completed AND left no unresolved
+	// critical finding (Status != "review_failed"). A review that did not complete
+	// never passes the gate. This is the ONLY field a host should treat as "review
+	// gate passed"; review=true alone or a returned result must not be.
+	GatePassed bool `json:"gate_passed"`
+	// Confidence summarizes the two flags into one label: "review_failed" when a
+	// critical finding survived the revision round (Status=="review_failed"),
+	// "reviewed" when the gate passed, else "unverified" (review was requested but
+	// did not complete).
+	Confidence string `json:"confidence"`
 }
 
 // Isolation records the outcome of an isolate-mode dispatch (see
@@ -1910,6 +1944,31 @@ func (o *Orchestrator) finishReviewed(ar authorOutcome, agg reviewRecord, perRev
 	// Expose every reviewer's outcome (per-reviewer, not the aggregate) on the
 	// Result so the host can gate on individual verdicts/findings.
 	res.Reviews = perReviewer
+	// Make the review's trust status EXPLICIT (see ReviewStatus): this path only
+	// runs when review was requested. Completed iff at least one reviewer returned a
+	// real (non-errored) verdict; GatePassed iff completed AND no unresolved critical
+	// finding flipped the status to "review_failed"; Confidence folds the two into a
+	// single label.
+	completed := false
+	for _, r := range perReviewer {
+		if !r.Errored {
+			completed = true
+			break
+		}
+	}
+	gatePassed := completed && res.Status != "review_failed"
+	confidence := "unverified"
+	if res.Status == "review_failed" {
+		confidence = "review_failed"
+	} else if gatePassed {
+		confidence = "reviewed"
+	}
+	res.Review = &ReviewStatus{
+		Requested:  true,
+		Completed:  completed,
+		GatePassed: gatePassed,
+		Confidence: confidence,
+	}
 	return res, nil
 }
 
