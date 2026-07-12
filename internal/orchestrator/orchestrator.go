@@ -299,10 +299,13 @@ func (o *Orchestrator) dispatchStore() dispatchMem {
 //     as defense-in-depth on top of plan mode, replacing the author's
 //     acceptEdits + sensitive-pattern-only disallow list.
 //   - codex: -s read-only instead of -s workspace-write.
-//   - agy: no scoped read-only/plan-mode flag exists among its supported
-//     args (see the case above) — the grant is left unchanged and the
-//     reviewer relies solely on the prompt-level "do not modify files"
-//     instruction baked into agentproto.BuildReviewPrompt.
+//   - agy: --mode plan (agy's plan execution mode, no edits) plus --sandbox
+//     (terminal restrictions), and the cwd write grant is dropped so only the
+//     read-only memory dir is added. This replaces the prior behavior where the
+//     agy reviewer inherited the author's --dangerously-skip-permissions — i.e.
+//     a full permission bypass on a reviewer that must never write. It no longer
+//     relies solely on the prompt-level "do not modify files" instruction baked
+//     into agentproto.BuildReviewPrompt; the CLI flags now enforce it too.
 //
 // effort, when non-empty, is the reasoning-effort level for THIS dispatch (see
 // EffortForDifficulty / the DispatchModel host override). It is a dispatch
@@ -361,7 +364,31 @@ func buildDispatchArgs(agentName, task, sysPrompt, memDir, cwd string, reviewMod
 		extra = append(extra, policy.ClaudeDisallowedToolArgs()...)
 		return task, extra
 	case "agy":
-		return sysPrompt + "\n\n" + task, []string{
+		// agy has no --append-system-prompt, so the instruction rides the task text.
+		taskToSend := sysPrompt + "\n\n" + task
+		if reviewMode {
+			// Read-only reviewer/planner: grant ONLY the memory dir (to read the
+			// shared context) and use agy's plan mode + sandbox so it cannot
+			// write/edit or run unrestricted shell — mirroring claude
+			// (--permission-mode plan) and codex (-s read-only). Deliberately NO
+			// --dangerously-skip-permissions and NO cwd write grant: previously the
+			// agy reviewer inherited the author's full permission bypass, letting a
+			// reviewer modify the caller's tree. A reviewer must never write.
+			return taskToSend, []string{
+				"--add-dir", memDir,
+				"--mode", "plan",
+				"--sandbox",
+			}
+		}
+		// Author: needs write access to the working tree. NOTE: agy's only
+		// confirmed headless write-enabler today is --dangerously-skip-permissions
+		// (its narrower --mode accept-edits is not yet verified). This blanket
+		// bypass is a known P0 weakness — a mis-routed task reaching agy authors
+		// with all permissions skipped. The safe fix is to run agy authors inside
+		// an isolate worktree (see DispatchIsolated) and/or verify --mode
+		// accept-edits so the bypass can be dropped; left unchanged here to avoid
+		// regressing agy authoring until that is verified.
+		return taskToSend, []string{
 			"--add-dir", cwd,
 			"--add-dir", memDir,
 			"--dangerously-skip-permissions",
