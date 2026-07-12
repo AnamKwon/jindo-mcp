@@ -601,6 +601,29 @@ func (s *Server) toolsList(req *Request) Response {
 	return resultResponse(req.ID, map[string]any{"tools": tools()})
 }
 
+// ToolInfo is the name and human description of one advertised tool: the
+// read-only catalog surface used to keep docs/tools.md in sync with the tools
+// tools/list actually advertises. It deliberately omits the input schema, which
+// the doc does not enumerate.
+type ToolInfo struct {
+	Name        string
+	Description string
+}
+
+// ToolCatalog returns the name and full description of every tool advertised by
+// tools/list, in the same stable order as tools(). It executes no request and
+// mutates nothing, so callers (and the docs-sync test) can enumerate the tool
+// surface directly; a caller wanting only the first sentence can trim the
+// returned Description itself.
+func ToolCatalog() []ToolInfo {
+	defs := tools()
+	cat := make([]ToolInfo, len(defs))
+	for i, d := range defs {
+		cat[i] = ToolInfo{Name: d.Name, Description: d.Description}
+	}
+	return cat
+}
+
 // callParams is the tools/call parameter envelope: which tool, and its raw
 // arguments object (decoded per-tool).
 type callParams struct {

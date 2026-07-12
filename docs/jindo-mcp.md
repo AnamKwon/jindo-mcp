@@ -77,7 +77,10 @@ required.
 
 ## Tools
 
-The server exposes seven tools (defined in `internal/mcp`):
+The server registers 16 tools (defined in `internal/mcp`). The sections below
+document the core tools; for the **full, auto-checked catalog** of every
+registered tool — kept in sync with the code by the `TestToolsDocInSync` test —
+see [`docs/tools.md`](tools.md), which is the authoritative list.
 
 ### `dispatch`
 
@@ -209,14 +212,21 @@ Input:
 Aggregate `dispatch.log` (`internal/calibrate`) into a routing calibration
 report: status distribution per tier/model, signal match frequencies,
 near-threshold dispatch count, per-model author-run latency, cross-model
-review outcomes, and advisory-only threshold/weight suggestions. It only
-reads the log; it never mutates routing config.
+review outcomes, and advisory-only threshold/weight suggestions. By default
+(`apply` omitted or `false`) it is **report-only**: it reads the log and
+proposes tuning but writes nothing and never mutates routing config. Only when
+`apply: true` is explicitly passed does it additionally derive conservative
+routing tuning from the report and write it to the routing overrides file
+(`overrides_path`, default `.jindo/routing_overrides.json`) that
+`routing.ApplyOverrides` consumes.
 
 Input:
 
-| Field  | Type   | Required | Description                                                        |
-|--------|--------|----------|----------------------------------------------------------------------|
-| `path` | string | no       | Path to the dispatch.log JSONL file. Defaults to `.jindo/dispatch.log` relative to the server's working directory. |
+| Field            | Type    | Required | Description                                                        |
+|------------------|---------|----------|----------------------------------------------------------------------|
+| `path`           | string  | no       | Path to the dispatch.log JSONL file. Defaults to `.jindo/dispatch.log` relative to the server's working directory. |
+| `apply`          | boolean | no       | When `true`, derive conservative routing tuning from the report and write it to `overrides_path`. Defaults to `false` (report-only, writes nothing). |
+| `overrides_path` | string  | no       | Where to write the derived overrides when `apply: true`. Defaults to `.jindo/routing_overrides.json` relative to the server's working directory. |
 
 Returns the aggregated report, which includes:
 - **status by tier / status by model** — outcome counts
@@ -332,14 +342,24 @@ concurrent agents see the compacted store on their next memory read.
 
 ### Exposed tools
 
-The MCP server now provides **seven tools**:
+The MCP server registers **16 tools** — the full, test-verified catalog is in
+[`docs/tools.md`](tools.md) (kept in sync with the code by `TestToolsDocInSync`):
 - `dispatch`: route + run a task, store result in shared memory (optionally with cross-model peer review)
 - `dispatch_async`: submit a task to run in the background, return a `job_id` immediately
+- `dispatch_multi`: fan a task out to multiple models in read-only propose mode, returning each candidate (optionally a judge synthesis)
+- `dispatch_multi_async`: background variant of `dispatch_multi`, returning a `job_id` immediately
 - `job_status`: long-poll a `job_id` for the terminal (`done`/`error`) result
+- `plan`: decompose a goal into an ordered, step-gated plan and make it the active plan state
+- `plan_next`: return the next runnable step of the active plan, plus the remaining count
+- `plan_record`: record a step's outcome (`done`/`failed`) with an optional note
+- `plan_revise`: adapt the remaining plan (add/update/remove steps)
+- `plan_status`: read the full active plan state
+- `plan_gate`: the autonomous loop's stop gate (integration verify + goal-met judge)
 - `memory`: read a specific key or the full store
 - `agents`: list agent/model routing table
+- `models_refresh`: probe installed CLIs for available models, propose routing for new ones (read-only)
 - `compact`: run compaction with specified options (MaxEntries, TTLSeconds, etc.)
-- `calibrate`: aggregate dispatch.log into a routing calibration report
+- `calibrate`: aggregate dispatch.log into a routing calibration report (report-only unless `apply: true`)
 
 ## Legacy Python implementation
 

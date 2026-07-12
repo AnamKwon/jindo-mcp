@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -145,6 +146,46 @@ func TestToolsList(t *testing.T) {
 	want := []string{"agents", "calibrate", "compact", "dispatch", "dispatch_async", "dispatch_multi", "dispatch_multi_async", "job_status", "memory", "models_refresh", "plan", "plan_gate", "plan_next", "plan_record", "plan_revise", "plan_status"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("tool names = %v, want %v", got, want)
+	}
+}
+
+// docToolRowRe matches a tool-catalog table row in docs/tools.md whose first
+// column is a backticked tool name (e.g. "| `dispatch` | ..."), capturing the
+// name. The header and separator rows have no backticked first cell, so they
+// are ignored.
+var docToolRowRe = regexp.MustCompile("(?m)^\\|\\s*`([a-z_]+)`\\s*\\|")
+
+// TestToolsDocInSync guards docs/tools.md against tool drift in BOTH directions:
+// every tool ToolCatalog() advertises must appear in the doc, and every tool
+// the doc lists must exist in the catalog. So adding, removing, or renaming a
+// tool in the code without updating the doc (or vice versa) fails this test.
+// The comparison is a name-set comparison (order- and description-agnostic), so
+// it is robust to reordering rows or editing wording.
+func TestToolsDocInSync(t *testing.T) {
+	// The repo root is two levels up from internal/mcp.
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "tools.md"))
+	if err != nil {
+		t.Fatalf("read docs/tools.md: %v", err)
+	}
+	docNames := make(map[string]bool)
+	for _, m := range docToolRowRe.FindAllStringSubmatch(string(data), -1) {
+		docNames[m[1]] = true
+	}
+	if len(docNames) == 0 {
+		t.Fatalf("docs/tools.md has no backticked tool rows; regex or doc format changed")
+	}
+
+	catNames := make(map[string]bool)
+	for _, ti := range ToolCatalog() {
+		catNames[ti.Name] = true
+		if !docNames[ti.Name] {
+			t.Errorf("tool %q is registered (ToolCatalog) but missing from docs/tools.md", ti.Name)
+		}
+	}
+	for name := range docNames {
+		if !catNames[name] {
+			t.Errorf("docs/tools.md lists tool %q that is not registered (not in ToolCatalog)", name)
+		}
 	}
 }
 
