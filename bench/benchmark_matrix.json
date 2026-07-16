@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "promotion_gate": {
+    "minimum_items_per_cell": 20,
+    "minimum_repeats": 3,
+    "primary_metric": "objective_correctness",
+    "tie_break_order": ["critical_defect_rate", "repeatability", "cost", "latency"],
+    "rule": "Promote a cell-specific default only when the advantage repeats; otherwise keep a provider-diverse tie set."
+  },
+  "campaigns": [
+    {
+      "id": "coding_language_semantics",
+      "purpose": "Measure language-specific implementation and debugging strength on native failure modes.",
+      "kind": "coding",
+      "cells": [
+        {"language": "go", "task_types": ["concurrency_fencing", "stateful_transaction", "migration_durability", "api_debugging_retry_semantics:measured_three_repeats_reviewed", "concurrency_fencing_test_generation:measured_v2_repeated_reviewed_not_promotable"], "status": "partially_measured"},
+        {"language": "python", "task_types": ["async_cancellation:measured_three_repeats", "numerical_exact_apportionment:measured_three_repeats_reviewed", "contract_mutation_test_generation:measured_repeated_unstable", "descriptor_protocol:fixture_required", "numerical_dataframe:fixture_required", "packaging_resolution:fixture_required"], "status": "partially_measured"},
+        {"language": "typescript_javascript", "task_types": ["conditional_generics:fixture_required", "event_loop_ordering:screened", "security_archive_path_validation:measured_three_repeats_reviewed", "frontend_state:fixture_required", "build_boundary:fixture_required"], "status": "partially_measured"},
+        {"language": "rust", "task_types": ["optimistic_atomic_transaction:measured_three_repeats", "ownership_lifetime:fixture_required", "unsafe_invariant:fixture_required", "async_send_sync:fixture_required", "trait_coherence:fixture_required"], "status": "partially_measured"},
+        {"language": "cpp", "task_types": ["raii_reentrant_observer:measured_three_repeats", "undefined_behavior:fixture_required", "template_constraints:fixture_required", "abi_concurrency:fixture_required"], "status": "partially_measured"},
+        {"language": "c", "task_types": ["memory_safe_incremental_parser:measured_repeats_fresh_unstable", "undefined_behavior:fixture_required", "abi_boundary:fixture_required"], "status": "partially_measured"},
+        {"language": "java_kotlin", "task_types": ["deterministic_dependency_graph:screened", "multifile_transaction_refactor:measured_repeats_reviewed_unstable", "variance_generics:fixture_required", "jvm_concurrency:fixture_required", "transaction_boundary:fixture_required", "build_system:fixture_required"], "status": "partially_measured"},
+        {"language": "sql", "task_types": ["bitemporal_window_semantics:screened", "transaction_isolation:fixture_required", "query_plan:fixture_required", "temporal_null_edge:screened"], "status": "partially_measured"},
+        {"language": "shell", "task_types": ["quoting_atomic_file_reconciliation:measured_v2_repeats_fresh_unstable", "pipeline_exit_status:fixture_required", "signal_cleanup:partially_reviewed", "portability:measured_bash_3_2"], "status": "partially_measured"},
+        {"language": "swift", "task_types": ["actor_isolation_atomic_batch:measured_three_repeats_reviewed", "value_reference_semantics:covered_in_actor_fixture", "async_cancellation:fixture_required", "protocol_generics:fixture_required"], "status": "partially_measured"}
+      ],
+      "required_metrics": ["hidden_test_pass_rate", "build_rate", "critical_defect_rate", "repeatability", "latency"]
+    },
+    {
+      "id": "coding_work_purpose",
+      "purpose": "Separate model strength by software-work objective rather than language alone.",
+      "kind": "coding",
+      "task_types": ["greenfield_implementation", "debugging", "multi_file_refactor", "api_upgrade", "performance", "distributed_systems", "security", "frontend", "data_pipeline", "numerical_code", "test_generation", "code_review"],
+      "status": "partially_measured_debugging_numerical_security_multifile_refactor_and_test_generation",
+      "required_metrics": ["objective_gate_pass_rate", "regression_rate", "scope_discipline", "critical_defect_rate"]
+    },
+    {
+      "id": "hle_subject_reasoning",
+      "purpose": "Measure noncoding strength without collapsing distinct subjects and reasoning forms into one HLE score.",
+      "kind": "noncoding",
+      "domains": ["mathematics", "physics", "chemistry", "biology", "computer_science_theory", "medicine", "law", "history_humanities", "social_science", "general_knowledge"],
+      "reasoning_forms": ["exact_calculation", "formal_proof", "multiple_choice", "short_answer", "long_form_explanation", "source_grounded_synthesis", "chart_table_image_reasoning"],
+      "required_metrics": ["exact_or_rubric_accuracy", "calibration_error", "abstention_quality", "repeatability"]
+    },
+    {
+      "id": "prompt_language_transfer",
+      "purpose": "Measure whether routing changes for the same underlying item across prompt languages.",
+      "kind": "multilingual",
+      "prompt_languages": ["korean", "english", "japanese", "multilingual_mixed"],
+      "status": "english_korean_paired_for_java_dependency_and_sql_bitemporal",
+      "pairing_rule": "Use semantically aligned item pairs and score answer equivalence, not literal string identity.",
+      "required_metrics": ["paired_accuracy_delta", "instruction_following_delta", "terminology_error_rate"]
+    },
+    {
+      "id": "reviewer_defect_detection",
+      "purpose": "Calibrate reviewer models independently from author performance.",
+      "kind": "review",
+      "mutations": ["subtle_contract_violation", "false_positive_trap", "concurrency_bug", "security_bug", "numerical_edge_case", "citation_error", "correct_but_unusual_solution"],
+      "status": "measured_20_cases_3_repeats_for_python_rust_contracts",
+      "required_metrics": ["critical_recall", "precision", "false_positive_rate", "severity_accuracy", "location_accuracy", "repeatability"]
+    }
+  ]
+}

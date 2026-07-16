@@ -127,8 +127,8 @@ func TestToolsList(t *testing.T) {
 	if !ok {
 		t.Fatalf("tools missing/wrong type: %v", m["tools"])
 	}
-	if len(toolsRaw) != 16 {
-		t.Fatalf("tools length = %d, want 16", len(toolsRaw))
+	if len(toolsRaw) != 17 {
+		t.Fatalf("tools length = %d, want 17", len(toolsRaw))
 	}
 	got := make([]string, 0, 9)
 	for _, tr := range toolsRaw {
@@ -143,7 +143,7 @@ func TestToolsList(t *testing.T) {
 		}
 	}
 	sort.Strings(got)
-	want := []string{"agents", "calibrate", "compact", "dispatch", "dispatch_async", "dispatch_multi", "dispatch_multi_async", "job_status", "memory", "models_refresh", "plan", "plan_gate", "plan_next", "plan_record", "plan_revise", "plan_status"}
+	want := []string{"agents", "calibrate", "compact", "dispatch", "dispatch_async", "dispatch_multi", "dispatch_multi_async", "job_status", "memory", "models_refresh", "plan", "plan_gate", "plan_next", "plan_record", "plan_revise", "plan_status", "route_capability"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("tool names = %v, want %v", got, want)
 	}
@@ -359,6 +359,173 @@ func TestToolsCallDispatchStatusSummary(t *testing.T) {
 	// matching the reported difficulty.
 	if res.Rationale.Tier != res.Difficulty {
 		t.Fatalf("rationale tier = %q, want difficulty %q (text=%s)", res.Rationale.Tier, res.Difficulty, text)
+	}
+}
+
+func TestToolsCallDispatchCapabilityUsesHostSelectedModel(t *testing.T) {
+	canned := `{"status":"ok","result":"fixed","summary":"done","memory_updates":[]}`
+	s, _ := newTestServer(t, canned)
+	resp := call(t, s, `{"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"dispatch","arguments":{"task":"repair the lease","model":"gpt-5.6-terra","selection_reason":"Terra has relevant review evidence; the race test and review gate cover uncertainty","isolate":false,"review":true,"verify":["go version"],"capability":{"domain":"coding","language":"go","task_type":"concurrency_fencing","risk":"high","oracle":"deterministic"}}}}`)
+	if resp.Error != nil {
+		t.Fatalf("dispatch returned error: %+v", resp.Error)
+	}
+	var got struct {
+		Agent           string `json:"agent"`
+		Model           string `json:"model"`
+		CapabilityRoute struct {
+			Mode           string `json:"mode"`
+			EvidenceStatus string `json:"evidence_status"`
+		} `json:"capability_route"`
+		CapabilitySelection struct {
+			Owner                     string   `json:"owner"`
+			Models                    []string `json:"models"`
+			WithinBenchmarkCandidates bool     `json:"within_benchmark_candidates"`
+		} `json:"capability_selection"`
+	}
+	if err := json.Unmarshal([]byte(contentText(t, resp)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Agent != "codex" || got.Model != "gpt-5.6-terra" {
+		t.Fatalf("author = %s/%s", got.Agent, got.Model)
+	}
+	if got.CapabilityRoute.Mode != "cascade" || got.CapabilityRoute.EvidenceStatus != "measured_single_repeat" {
+		t.Fatalf("capability route = %+v", got.CapabilityRoute)
+	}
+	if got.CapabilitySelection.Owner != "host" || len(got.CapabilitySelection.Models) != 1 || got.CapabilitySelection.Models[0] != "gpt-5.6-terra" || got.CapabilitySelection.WithinBenchmarkCandidates {
+		t.Fatalf("capability selection = %+v", got.CapabilitySelection)
+	}
+}
+
+func TestToolsCallDispatchCapabilityRequiresObjectiveAndReviewGates(t *testing.T) {
+	s, _ := newTestServer(t, "canned")
+	base := `{"task":"repair the lease","model":"Gemini 3.5 Flash (Low)","selection_reason":"direct cell evidence plus deterministic race oracle","capability":{"domain":"coding","language":"go","task_type":"concurrency_fencing","risk":"high","oracle":"deterministic"}`
+	for _, tc := range []struct {
+		name, suffix, want string
+	}{
+		{"missing verify", `,"review":true}`, "requires verify"},
+		{"missing review", `,"verify":["go version"]}`, "requires review=true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := call(t, s, `{"jsonrpc":"2.0","id":306,"method":"tools/call","params":{"name":"dispatch","arguments":`+base+tc.suffix+`}}`)
+			if resp.Error == nil || resp.Error.Code != codeInvalidParams || !strings.Contains(resp.Error.Message, tc.want) {
+				t.Fatalf("error = %+v, want invalid params containing %q", resp.Error, tc.want)
+			}
+		})
+	}
+}
+
+func TestToolsCallDispatchCapabilityRequiresHostSelection(t *testing.T) {
+	s, _ := newTestServer(t, "canned")
+	resp := call(t, s, `{"jsonrpc":"2.0","id":302,"method":"tools/call","params":{"name":"dispatch","arguments":{"task":"solve this biology question","capability":{"domain":"biology","task_type":"short_answer","risk":"high","oracle":"exact_answer"}}}}`)
+	if resp.Error == nil || resp.Error.Code != codeInvalidParams {
+		t.Fatalf("error = %+v, want invalid params", resp.Error)
+	}
+	if !strings.Contains(resp.Error.Message, "host model selection") {
+		t.Fatalf("error must require host selection: %+v", resp.Error)
+	}
+}
+
+func TestToolsCallDispatchCapabilityRequiresSelectionReason(t *testing.T) {
+	s, _ := newTestServer(t, "canned")
+	resp := call(t, s, `{"jsonrpc":"2.0","id":308,"method":"tools/call","params":{"name":"dispatch","arguments":{"task":"repair","model":"gpt-5.6-terra","verify":["go version"],"review":true,"capability":{"domain":"coding","language":"go","task_type":"concurrency_fencing","risk":"high","oracle":"deterministic"}}}}`)
+	if resp.Error == nil || !strings.Contains(resp.Error.Message, "selection_reason") {
+		t.Fatalf("error = %+v, want selection_reason requirement", resp.Error)
+	}
+}
+
+func TestToolsCallDispatchMultiCapabilityUsesHostSelectedModels(t *testing.T) {
+	canned := `{"status":"ok","result":"answer","summary":"done","memory_updates":[]}`
+	s, _ := newTestServer(t, canned)
+	resp := call(t, s, `{"jsonrpc":"2.0","id":303,"method":"tools/call","params":{"name":"dispatch_multi","arguments":{"task":"hard biology question","models":["gpt-5.6-terra","Gemini 3.5 Flash (Medium)"],"selection_reason":"subject evidence diverges and exact scoring can adjudicate both","synthesis":"none","capability":{"domain":"biology","task_type":"short_answer","risk":"high","oracle":"exact_answer"}}}}`)
+	if resp.Error != nil {
+		t.Fatalf("dispatch_multi returned error: %+v", resp.Error)
+	}
+	var got struct {
+		Candidates      []map[string]any `json:"candidates"`
+		CapabilityRoute struct {
+			Mode string `json:"mode"`
+		} `json:"capability_route"`
+	}
+	if err := json.Unmarshal([]byte(contentText(t, resp)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candidates) != 2 || got.CapabilityRoute.Mode != "parallel_compare" {
+		t.Fatalf("result = %+v", got)
+	}
+}
+
+func TestToolsCallDispatchMultiCapabilityRequiresHostModelSetAndReason(t *testing.T) {
+	s, _ := newTestServer(t, "canned")
+	capability := `"capability":{"domain":"biology","task_type":"short_answer","risk":"high","oracle":"exact_answer"}`
+	for _, tc := range []struct{ args, want string }{
+		{`{"task":"question",` + capability + `}`, "host model-set selection"},
+		{`{"task":"question","models":["gpt-5.6-terra"],` + capability + `}`, "selection_reason"},
+	} {
+		resp := call(t, s, `{"jsonrpc":"2.0","id":307,"method":"tools/call","params":{"name":"dispatch_multi","arguments":`+tc.args+`}}`)
+		if resp.Error == nil || !strings.Contains(resp.Error.Message, tc.want) {
+			t.Fatalf("error = %+v, want %q", resp.Error, tc.want)
+		}
+	}
+}
+
+func TestToolsCapabilitySchemaOnDispatchTools(t *testing.T) {
+	s, _ := newTestServer(t, "canned")
+	resp := call(t, s, `{"jsonrpc":"2.0","id":304,"method":"tools/list"}`)
+	toolsRaw, _ := resultMap(t, resp)["tools"].([]any)
+	seen := map[string]bool{}
+	for _, raw := range toolsRaw {
+		tool, _ := raw.(map[string]any)
+		name, _ := tool["name"].(string)
+		if name != "dispatch" && name != "dispatch_async" && name != "dispatch_multi" && name != "dispatch_multi_async" {
+			continue
+		}
+		schema, _ := tool["inputSchema"].(map[string]any)
+		props, _ := schema["properties"].(map[string]any)
+		capability, ok := props["capability"].(map[string]any)
+		if !ok || capability["type"] != "object" {
+			t.Fatalf("%s capability schema = %v", name, capability)
+		}
+		if _, ok := props["selection_reason"].(map[string]any); !ok {
+			t.Fatalf("%s selection_reason schema missing", name)
+		}
+		seen[name] = true
+	}
+	if len(seen) != 4 {
+		t.Fatalf("capability missing from tools: %v", seen)
+	}
+}
+
+func TestToolsCallRouteCapabilityIsReadOnlyAndAuditable(t *testing.T) {
+	s, _ := newTestServer(t, "canned")
+	resp := call(t, s, `{"jsonrpc":"2.0","id":305,"method":"tools/call","params":{"name":"route_capability","arguments":{"capability":{"domain":"coding","language":"rust","task_type":"debugging","risk":"high","oracle":"deterministic"}}}}`)
+	if resp.Error != nil {
+		t.Fatalf("route_capability returned error: %+v", resp.Error)
+	}
+	var got struct {
+		Mode                string `json:"mode"`
+		EvidenceStatus      string `json:"evidence_status"`
+		CalibrationRequired bool   `json:"calibration_required"`
+		Candidates          []struct {
+			Agent string `json:"agent"`
+			Model string `json:"model"`
+		} `json:"candidates"`
+		CandidateEvidence []routing.CapabilityCandidateEvidence `json:"candidate_evidence"`
+		HostSelection     struct {
+			Owner          string `json:"owner"`
+			CandidateOrder string `json:"candidate_order"`
+		} `json:"host_selection"`
+	}
+	if err := json.Unmarshal([]byte(contentText(t, resp)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Mode != "parallel_compare" || got.EvidenceStatus != "unmeasured_language_or_task_type" || !got.CalibrationRequired {
+		t.Fatalf("route = %+v", got)
+	}
+	if len(got.Candidates) != 3 {
+		t.Fatalf("candidates = %+v", got.Candidates)
+	}
+	if len(got.CandidateEvidence) != 3 || got.HostSelection.Owner != "host" || got.HostSelection.CandidateOrder != "benchmark_prior_not_execution_order" {
+		t.Fatalf("decision support = evidence:%+v selection:%+v", got.CandidateEvidence, got.HostSelection)
 	}
 }
 
@@ -1613,7 +1780,7 @@ func TestToolsCallDispatchMultiAsyncMissingModels(t *testing.T) {
 // planGatePayload mirrors orchestrator.GateResult for decoding the plan_gate
 // tool's JSON content.
 type planGatePayload struct {
-	StepsRemaining int  `json:"steps_remaining"`
+	StepsRemaining int `json:"steps_remaining"`
 	Verify         struct {
 		Passed   bool     `json:"passed"`
 		Commands []string `json:"commands"`

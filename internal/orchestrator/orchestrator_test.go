@@ -2487,11 +2487,11 @@ func TestPlanDefaultsToClaudeHardModelAndPersists(t *testing.T) {
 	if res.Agent != "claude" {
 		t.Errorf("res.Agent = %q, want claude", res.Agent)
 	}
-	if res.Model != "claude-opus-4-8" {
-		t.Errorf("res.Model = %q, want claude-opus-4-8 (claude hard tier)", res.Model)
+	if res.Model != "claude-fable-5" {
+		t.Errorf("res.Model = %q, want claude-fable-5 (claude hard tier)", res.Model)
 	}
-	if cap.gotModel != "claude-opus-4-8" {
-		t.Errorf("adapter got model %q, want claude-opus-4-8", cap.gotModel)
+	if cap.gotModel != "claude-fable-5" {
+		t.Errorf("adapter got model %q, want claude-fable-5", cap.gotModel)
 	}
 
 	// (b) read-only planner run: claude's reviewMode grant blocks edits.

@@ -104,8 +104,10 @@ echo "==> Registering jindo with detected MCP hosts:"
 registered=0
 if command -v claude >/dev/null 2>&1; then
   echo "  - Claude Code"
-  run "claude mcp remove jindo >/dev/null 2>&1 || true"
-  run "claude mcp add jindo -- \"$BIN\""
+  # Touch only Claude's private local registration. A project may intentionally
+  # carry a shared .mcp.json entry; an unscoped remove can erase that file.
+  run "claude mcp remove jindo -s local >/dev/null 2>&1 || true"
+  run "claude mcp add jindo -s local -- \"$BIN\""
   registered=1
 fi
 if command -v codex >/dev/null 2>&1; then
@@ -143,9 +145,10 @@ fi
 
 # Confirm the binary actually speaks MCP.
 echo "==> Smoke test (MCP handshake)"
-if printf '%s\n%s\n' \
+mcp_smoke="$(printf '%s\n%s\n' \
      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
-     '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | "$BIN" | grep -q '"jindo-mcp"'; then
+     '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | "$BIN")"
+if grep -q '"jindo-mcp"' <<<"$mcp_smoke"; then
   echo "    OK: jindo-mcp responds and lists its tools"
 else
   echo "    FAIL: no MCP response from $BIN" >&2

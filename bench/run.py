@@ -1,261 +1,411 @@
 #!/usr/bin/env python3
-"""jindo benchmark harness.
+"""Direct-CLI adversarial calibration benchmark for jindo model routing.
 
-Answers, with VERIFIED outcomes: (1) is JINDO actually better, and (2) which
-agent should route which work? For every task x config it sets up a fresh RED git
-repo from the fixture, dispatches through the jindo-mcp binary (isolate + verify),
-merges the returned branch on success, then runs the task's OWN verify commands as
-ground truth (incl. `-race` for concurrency tasks). It writes bench/report.md,
-bench/routing_proposal.json, bench/results.json.
+The benchmark deliberately does not dispatch through jindo, MCP, plugins, or
+skills.  Each candidate gets a fresh repository, the same prompt, and only its
+CLI's built-in code tools.  Hidden tests decide correctness.  When more than one
+candidate passes, independent read-only reviewers score the diffs; routing is
+ordered by correctness, review quality, repeatability, and only then latency.
 
-This revision runs a HARDER suite CODEX-ONLY (claude/agy tokens exhausted). With a
-single agent, cross-agent routing can't be compared; instead it measures the
-core product claim under one agent: does JINDO's objective verify gate +
-self-heal (auto-revision on verify failure) lift codex's verified success on hard
-tasks vs raw codex?
-  - codex_raw    : dispatch with NO verify -> author once, no gate, no retry.
-  - codex_verify : dispatch WITH verify    -> objective gate + auto-revision.
-The LIFT (codex_verify pass-rate minus codex_raw pass-rate) is JINDO's value here.
-
-Usage:  python3 bench/run.py
-Env:    JINDO_BIN, JINDO_BENCH_CONFIGS (comma list), JINDO_BENCH_MODEL (default gpt-5.5)
+Run `python3 bench/run.py --list-models` before a campaign, then use --dry-run.
+The full matrix is intentionally expensive; --models/--tasks make it resumable.
 """
-import json, os, subprocess, time, tempfile, shutil
+from __future__ import annotations
 
-REPO = os.environ.get("JINDO_REPO", "/Users/anamkwon/coding-agent-collaboration")
-BIN = os.environ.get("JINDO_BIN", os.path.join(REPO, "jindo-mcp"))
-WORKROOT = os.environ.get("JINDO_BENCH_WORK",
-    "/private/tmp/claude-501/-Users-anamkwon-coding-agent-collaboration/fa167fa5-2224-4e01-8cfe-2477b81d8b26/scratchpad/benchwork")
-CODEX_MODEL = os.environ.get("JINDO_BENCH_MODEL", "gpt-5.5")  # codex hard-tier
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import statistics
+import subprocess
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
 
-GO_MOD = "module bench\n\ngo 1.23\n"
+from adversarial_tasks import TASKS as GO_TASKS
+from diverse_tasks import TASKS as DIVERSE_TASKS
+from expansion_tasks import TASKS as EXPANSION_TASKS
+from general_tasks import TASKS as GENERAL_TASKS
+from language_tasks import TASKS as LANGUAGE_TASKS
+from verification_tasks import TASKS as VERIFICATION_TASKS
 
-# ---- HARD suite: hermetic, verify-gated, thorough tests (first attempts can fail) ----
-TASKS = [
-  {
-    "id": "lru_ttl", "task_type": "implementation", "difficulty": "hard", "language": "en",
-    "files": {
-      "go.mod": GO_MOD,
-      "p/lru_test.go": (
-        "package p\nimport (\"sync\";\"testing\";\"time\")\n"
-        "func TestLRUBasic(t *testing.T){ c:=New(2, time.Minute); c.Put(\"a\",1); c.Put(\"b\",2)\n"
-        " if v,ok:=c.Get(\"a\"); !ok||v!=1 {t.Fatalf(\"a=%v,%v\",v,ok)}\n"
-        " c.Put(\"c\",3) // evicts LRU which is b (a was just used)\n"
-        " if _,ok:=c.Get(\"b\"); ok {t.Fatalf(\"b should be evicted\")}\n"
-        " if v,ok:=c.Get(\"c\"); !ok||v!=3 {t.Fatalf(\"c=%v,%v\",v,ok)} }\n"
-        "func TestLRUTTL(t *testing.T){ c:=New(10, 30*time.Millisecond); c.Put(\"x\",9)\n"
-        " if _,ok:=c.Get(\"x\"); !ok {t.Fatalf(\"x should be present\")}\n"
-        " time.Sleep(60*time.Millisecond)\n"
-        " if _,ok:=c.Get(\"x\"); ok {t.Fatalf(\"x should have expired\")} }\n"
-        "func TestLRURace(t *testing.T){ c:=New(50, time.Minute); var wg sync.WaitGroup\n"
-        " for i:=0;i<50;i++{ wg.Add(1); go func(i int){ defer wg.Done(); c.Put(string(rune('A'+i%26)), i); c.Get(\"A\") }(i) }\n"
-        " wg.Wait() }\n"),
-    },
-    "prompt": ("Implement a concurrency-safe LRU cache with TTL in ./p/lru.go (package p): "
-               "`func New(capacity int, ttl time.Duration) *Cache`, methods `Put(key string, val int)`, "
-               "`Get(key string) (int, bool)`. Get returns false for missing OR expired entries. Put evicts "
-               "the least-recently-used entry when over capacity (Get counts as a use). It MUST be safe under "
-               "concurrent Put/Get (the tests run with -race). Only create ./p/lru.go."),
-    "verify": ["go test ./p/... -race"],
-  },
-  {
-    "id": "expr_eval", "task_type": "implementation", "difficulty": "hard", "language": "en",
-    "files": {
-      "go.mod": GO_MOD,
-      "p/eval_test.go": (
-        "package p\nimport \"testing\"\n"
-        "func TestEval(t *testing.T){\n"
-        " cases:=[]struct{in string;want float64;err bool}{\n"
-        "  {\"1+2*3\",7,false},{\"(1+2)*3\",9,false},{\"2*(3+4)-5\",9,false},\n"
-        "  {\"-3+4\",1,false},{\" 10 / 4 \",2.5,false},{\"2*-3\",-6,false},\n"
-        "  {\"1/0\",0,true},{\"1+\",0,true},{\"(1+2\",0,true},{\"\",0,true} }\n"
-        " for _,c:=range cases{ got,err:=Eval(c.in)\n"
-        "  if c.err { if err==nil {t.Fatalf(\"%q: expected error\",c.in)}; continue }\n"
-        "  if err!=nil {t.Fatalf(\"%q: unexpected err %v\",c.in,err)}\n"
-        "  if got!=c.want {t.Fatalf(\"%q: got %v want %v\",c.in,got,c.want)} } }\n"),
-    },
-    "prompt": ("Implement `func Eval(expr string) (float64, error)` in ./p/eval.go (package p): a correct "
-               "arithmetic expression evaluator supporting + - * / , parentheses, unary minus, decimals and "
-               "whitespace, with standard precedence. Return an error for division by zero, empty input, and "
-               "malformed expressions (dangling operator, unbalanced parens). Only create ./p/eval.go."),
-    "verify": ["go test ./p/..."],
-  },
-  {
-    "id": "merge_intervals", "task_type": "implementation", "difficulty": "standard", "language": "en",
-    "files": {
-      "go.mod": GO_MOD,
-      "p/iv_test.go": (
-        "package p\nimport (\"reflect\";\"testing\")\n"
-        "func TestMerge(t *testing.T){\n"
-        " cases:=[]struct{in,want [][2]int}{\n"
-        "  {[][2]int{{1,3},{2,6},{8,10},{15,18}},[][2]int{{1,6},{8,10},{15,18}}},\n"
-        "  {[][2]int{{1,4},{4,5}},[][2]int{{1,5}}},\n"
-        "  {[][2]int{{5,6},{1,2},{3,4}},[][2]int{{1,2},{3,4},{5,6}}},\n"
-        "  {[][2]int{{1,10},{2,3},{4,5}},[][2]int{{1,10}}},\n"
-        "  {[][2]int{},[][2]int{}} }\n"
-        " for _,c:=range cases{ if got:=Merge(c.in); !reflect.DeepEqual(got,c.want){t.Fatalf(\"in %v got %v want %v\",c.in,got,c.want)} } }\n"),
-    },
-    "prompt": ("Implement `func Merge(intervals [][2]int) [][2]int` in ./p/iv.go (package p): merge all "
-               "overlapping or touching intervals and return them sorted by start. Input may be unsorted; do "
-               "not mutate the input; empty input returns an empty (non-nil ok) slice. Only create ./p/iv.go."),
-    "verify": ["go test ./p/..."],
-  },
-  {
-    "id": "fix_race", "task_type": "debugging", "difficulty": "hard", "language": "en",
-    "files": {
-      "go.mod": GO_MOD,
-      "p/counter.go": ("package p\n// Tally counts occurrences concurrently. It has a data race bug.\n"
-                       "type Tally struct{ m map[string]int }\n"
-                       "func NewTally() *Tally { return &Tally{m: map[string]int{}} }\n"
-                       "func (t *Tally) Add(k string){ t.m[k]++ }\n"
-                       "func (t *Tally) Get(k string) int { return t.m[k] }\n"),
-      "p/counter_test.go": ("package p\nimport (\"sync\";\"testing\")\n"
-        "func TestTallyRace(t *testing.T){ tl:=NewTally(); var wg sync.WaitGroup\n"
-        " for i:=0;i<200;i++{ wg.Add(1); go func(){ defer wg.Done(); tl.Add(\"k\") }() }\n"
-        " wg.Wait(); if tl.Get(\"k\")!=200 {t.Fatalf(\"got %d want 200\",tl.Get(\"k\"))} }\n"),
-    },
-    "prompt": ("./p/counter_test.go fails under the race detector: Tally.Add/Get race on the map. Fix ./p/counter.go "
-               "so it is concurrency-safe (mutex or sharding) and `go test -race` passes, keeping the same API "
-               "(NewTally, Add, Get). Edit only ./p/counter.go."),
-    "verify": ["go test ./p/... -race"],
-  },
-  {
-    "id": "topo_sort", "task_type": "implementation", "difficulty": "hard", "language": "ko",
-    "files": {
-      "go.mod": GO_MOD,
-      "p/topo_test.go": (
-        "package p\nimport \"testing\"\n"
-        "func idx(order []string, s string) int { for i,v:=range order { if v==s {return i} }; return -1 }\n"
-        "func TestTopo(t *testing.T){ deps:=map[string][]string{\"a\":{\"b\",\"c\"},\"b\":{\"d\"},\"c\":{\"d\"},\"d\":{}}\n"
-        " order,err:=TopoSort(deps); if err!=nil {t.Fatalf(\"err %v\",err)}\n"
-        " if len(order)!=4 {t.Fatalf(\"len %d\",len(order))}\n"
-        " if idx(order,\"d\")>idx(order,\"b\")||idx(order,\"b\")>idx(order,\"a\") {t.Fatalf(\"bad order %v\",order)} }\n"
-        "func TestTopoCycle(t *testing.T){ if _,err:=TopoSort(map[string][]string{\"x\":{\"y\"},\"y\":{\"x\"}}); err==nil {t.Fatalf(\"expected cycle error\")} }\n"),
-    },
-    "prompt": ("./p/topo.go (package p)에 `func TopoSort(deps map[string][]string) ([]string, error)`를 구현해줘. "
-               "deps[n]은 n이 의존하는 노드들이야(그 노드들이 n보다 먼저 와야 함). 위상정렬 결과를 반환하되, "
-               "순환(cycle)이 있으면 error를 반환해. ./p/topo.go 만 생성해."),
-    "verify": ["go test ./p/...", "go vet ./p/..."],
-  },
+TASKS = GO_TASKS + LANGUAGE_TASKS + DIVERSE_TASKS + GENERAL_TASKS + EXPANSION_TASKS + VERIFICATION_TASKS
+
+REPO = Path(__file__).resolve().parents[1]
+OUT = REPO / "bench" / "calibration"
+WORK = Path(os.environ.get("JINDO_BENCH_WORK", tempfile.gettempdir())) / "jindo-routing-bench"
+TIMEOUT = int(os.environ.get("JINDO_BENCH_TIMEOUT", "1800"))
+
+# IDs are CLI-facing, not API guesses. agy inventory is refreshed live below.
+STATIC_MODELS = [
+    {"key": "codex:gpt-5.6-luna", "agent": "codex", "model": "gpt-5.6-luna", "effort": "high"},
+    {"key": "codex:gpt-5.6-terra", "agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+    {"key": "codex:gpt-5.6-sol", "agent": "codex", "model": "gpt-5.6-sol", "effort": "high"},
+    {"key": "codex:gpt-5.4-mini", "agent": "codex", "model": "gpt-5.4-mini", "effort": "high"},
+    {"key": "codex:gpt-5.3-codex-spark", "agent": "codex", "model": "gpt-5.3-codex-spark", "effort": "high"},
+    {"key": "codex:gpt-5.5", "agent": "codex", "model": "gpt-5.5", "effort": "high"},
+    {"key": "claude:claude-sonnet-5", "agent": "claude", "model": "claude-sonnet-5", "effort": "high"},
+    {"key": "claude:claude-opus-4-8", "agent": "claude", "model": "claude-opus-4-8", "effort": "high"},
+    {"key": "claude:claude-fable-5", "agent": "claude", "model": "claude-fable-5", "effort": "high"},
+    {"key": "claude:claude-haiku-4-5", "agent": "claude", "model": "claude-haiku-4-5", "effort": "high"},
 ]
+REVIEWERS = ["codex:gpt-5.6-sol", "claude:claude-fable-5", "agy:Gemini 3.5 Flash (High)"]
 
-# ---- Configs: CODEX-ONLY (claude/agy tokens exhausted) ---------------------
-# codex_raw: no verify (author once). codex_verify: verify gate + auto-revision.
-DEFAULT_CONFIGS = [
-  {"name": "codex_raw",    "model": CODEX_MODEL, "review": False, "verify": False},
-  {"name": "codex_verify", "model": CODEX_MODEL, "review": False, "verify": True},
-]
 
-def sh(*a, cwd=None): return subprocess.run(a, cwd=cwd, capture_output=True, text=True)
+@dataclass(frozen=True)
+class Command:
+    argv: list[str]
+    env: dict[str, str]
 
-def setup_repo(task):
-    d = tempfile.mkdtemp(prefix=f"{task['id']}-", dir=WORKROOT)
-    for rel, content in task["files"].items():
-        p = os.path.join(d, rel); os.makedirs(os.path.dirname(p), exist_ok=True); open(p,"w").write(content)
-    sh("git","init","-q",cwd=d); sh("git","config","user.email","b@b",cwd=d); sh("git","config","user.name","b",cwd=d)
-    sh("git","add","-A",cwd=d); sh("git","commit","-qm","RED",cwd=d)
-    return d
 
-def run_verify(d, cmds):
-    for c in cmds:
-        r = sh(*c.split(), cwd=d)
-        if r.returncode != 0: return False
-    return True
+def run(argv, *, cwd=None, env=None, timeout=TIMEOUT):
+    return subprocess.run(argv, cwd=cwd, env=env, text=True, capture_output=True, timeout=timeout)
 
-class Client:
-    def __init__(self):
-        self.p=subprocess.Popen([BIN],cwd=REPO,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,bufsize=1); self.id=0
-        self._rpc("initialize",{})
-    def _rpc(self,method,params):
-        self.id+=1;rid=self.id
-        self.p.stdin.write(json.dumps({"jsonrpc":"2.0","id":rid,"method":method,"params":params})+"\n");self.p.stdin.flush()
-        while True:
-            ln=self.p.stdout.readline()
-            if not ln: raise RuntimeError("closed")
-            ln=ln.strip()
-            if not ln: continue
-            o=json.loads(ln)
-            if o.get("id")==rid:
-                if o.get("error"): raise RuntimeError(o["error"])
-                return o.get("result")
-    def tool(self,name,args): return json.loads(self._rpc("tools/call",{"name":name,"arguments":args})["content"][0]["text"])
-    def dispatch_async(self,args):
-        j=self.tool("dispatch_async",args);jid=j["job_id"]
-        while True:
-            s=self.tool("job_status",{"job_id":jid,"wait_sec":25})
-            if s.get("status") in ("done","error"): return s.get("result",s)
-    def close(self):
-        try: self.p.stdin.close(); self.p.wait(timeout=10)
-        except Exception: pass
 
-def run_case(cli, task, cfg):
-    d = setup_repo(task)
-    args = {"task": task["prompt"], "workdir": d, "model": cfg["model"],
-            "review": cfg["review"], "isolate": True, "effort": "high"}
-    if cfg["verify"]: args["verify"] = task["verify"]
-    t0=time.time()
-    try: r=cli.dispatch_async(args)
-    except Exception as e:
-        shutil.rmtree(d,ignore_errors=True)
-        return {"ok":False,"err":str(e),"secs":round(time.time()-t0,1),"agent":"?","revisions":0}
-    secs=round(time.time()-t0,1)
-    iso=r.get("isolation") or {}
-    if iso.get("committed") and iso.get("branch"):
-        sh("git","merge","--no-ff",iso["branch"],"-m","merge",cwd=d)
-    passed = run_verify(d, task["verify"])   # ground truth = task's own verify (incl -race)
-    revisions = (r.get("verify") or {}).get("revisions") or r.get("verify_revisions") or 0
-    shutil.rmtree(d,ignore_errors=True)
-    return {"ok":passed,"secs":secs,"agent":r.get("agent","?"),
-            "status":r.get("status"),"verify_reported":(r.get("verify") or {}).get("passed"),
-            "revisions":revisions}
+def cli_versions():
+    result = {}
+    for cli in ("codex", "claude", "agy"):
+        try:
+            p = run([cli, "--version"], timeout=20)
+            result[cli] = (p.stdout or p.stderr).strip() if p.returncode == 0 else f"error: {p.stderr.strip()}"
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            result[cli] = f"error: {exc}"
+    return result
+
+
+def agy_models():
+    try:
+        p = run(["agy", "models"], timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [line.strip() for line in p.stdout.splitlines() if line.strip()] if p.returncode == 0 else []
+
+
+def inventory():
+    models = list(STATIC_MODELS)
+    for name in agy_models():
+        # agy is a multi-provider frontend; routing calibration here uses only
+        # its native Gemini surface, avoiding duplicate Claude/OpenAI backends.
+        if name.startswith("Gemini "):
+            models.append({"key": f"agy:{name}", "agent": "agy", "model": name, "effort": "high"})
+    return models
+
+
+def candidate_command(candidate, prompt, cwd):
+    agent, model = candidate["agent"], candidate["model"]
+    env = os.environ.copy()
+    env["JINDO_BENCH_MODE"] = "1"
+    if agent == "codex":
+        argv = ["codex", "exec", "-m", model, "-C", str(cwd), "-s", "workspace-write",
+                "--ephemeral", "--ignore-user-config", "--ignore-rules", prompt]
+    elif agent == "claude":
+        argv = ["claude", "--safe-mode", "--disable-slash-commands", "--strict-mcp-config",
+                "--mcp-config", '{"mcpServers":{}}', "--setting-sources", "", "--model", model,
+                "--effort", candidate.get("effort", "high"), "--permission-mode", "acceptEdits",
+                "--tools", "Bash,Read,Edit,Write,Glob,Grep", "--no-session-persistence", "-p", prompt]
+    elif agent == "agy":
+        anchored = (f"The only target repository is {cwd}. Begin by changing directory to that exact "
+                    f"path and edit files there; do not create or use an Antigravity scratch project.\n\n{prompt}")
+        argv = ["agy", "--model", model, "--mode", "accept-edits", "--sandbox",
+                "--add-dir", str(cwd), "-p", anchored]
+    else:
+        raise ValueError(f"unknown agent: {agent}")
+    return Command(argv, env)
+
+
+def reviewer_command(candidate, prompt, cwd):
+    cmd = candidate_command(candidate, prompt, cwd)
+    argv = list(cmd.argv)
+    if candidate["agent"] == "codex":
+        argv[argv.index("workspace-write")] = "read-only"
+    elif candidate["agent"] == "claude":
+        argv[argv.index("acceptEdits")] = "plan"
+        tools = argv.index("Bash,Read,Edit,Write,Glob,Grep")
+        argv[tools] = "Bash,Read,Glob,Grep"
+    elif candidate["agent"] == "agy":
+        argv[argv.index("accept-edits")] = "plan"
+    return Command(argv, cmd.env)
+
+
+def write_files(root, files):
+    for rel, content in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+
+def setup_repo(task, run_id):
+    root = WORK / run_id
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+    write_files(root, task["public_files"])
+    run(["git", "init", "-q"], cwd=root)
+    run(["git", "config", "user.email", "bench@localhost"], cwd=root)
+    run(["git", "config", "user.name", "jindo-bench"], cwd=root)
+    run(["git", "add", "-A"], cwd=root)
+    run(["git", "commit", "-qm", "RED fixture"], cwd=root)
+    return root
+
+
+def verify(root, task):
+    # Hidden tests are copied only after the model exits, then removed again.
+    copied = []
+    for rel, content in task["hidden_files"].items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+        copied.append(target)
+    checks = []
+    try:
+        for argv in task["verify"]:
+            try:
+                p = run(argv, cwd=root, timeout=task.get("verify_timeout", 180))
+                check = {"argv": argv, "ok": p.returncode == 0,
+                         "stdout": p.stdout[-4000:], "stderr": p.stderr[-4000:]}
+            except subprocess.TimeoutExpired as exc:
+                check = {"argv": argv, "ok": False, "timeout": True,
+                         "stdout": (exc.stdout or "")[-4000:], "stderr": (exc.stderr or "")[-4000:]}
+            checks.append(check)
+            if not check["ok"]:
+                break
+    finally:
+        for path in copied:
+            path.unlink(missing_ok=True)
+    return all(c["ok"] for c in checks), checks
+
+
+def validate_fixtures(tasks):
+    """Validate fixtures: reference solutions fully; legacy Go fixtures compile."""
+    failures = []
+    for task in tasks:
+        root = setup_repo(task, f"fixture-check-{task['id']}")
+        write_files(root, task["hidden_files"])
+        if task.get("reference_files"):
+            starter_passed = True
+            for argv in task["verify"]:
+                p = run(argv, cwd=root, timeout=task.get("verify_timeout", 180))
+                if p.returncode:
+                    starter_passed = False
+                    break
+            if starter_passed:
+                failures.append({"task": task["id"], "error": "RED starter unexpectedly passed hidden verification"})
+            write_files(root, task["reference_files"])
+            for argv in task["verify"]:
+                p = run(argv, cwd=root, timeout=task.get("verify_timeout", 180))
+                if p.returncode:
+                    failures.append({"task": task["id"], "argv": argv, "stderr": p.stderr, "stdout": p.stdout})
+                    break
+            shutil.rmtree(root, ignore_errors=True)
+            continue
+        packages = sorted({"./" + str(Path(rel).parent) for rel in task["hidden_files"] if rel.endswith(".go")})
+        for package in packages:
+            p = run(["go", "test", package, "-run", "^$", "-count=1"], cwd=root, timeout=120)
+            if p.returncode:
+                failures.append({"task": task["id"], "package": package, "stderr": p.stderr, "stdout": p.stdout})
+        shutil.rmtree(root, ignore_errors=True)
+    return failures
+
+
+def parse_review(text):
+    matches = re.findall(r"\{[\s\S]*?\}", text)
+    for raw in reversed(matches):
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        required = {"correctness", "invariants", "maintainability", "test_quality", "critical_findings"}
+        if required <= obj.keys():
+            scores = [max(0, min(10, float(obj[k]))) for k in ("correctness", "invariants", "maintainability", "test_quality")]
+            obj["score"] = round(sum(scores) / len(scores), 3)
+            return obj
+    return {"score": 0.0, "critical_findings": 1, "parse_error": True, "raw": text[-2000:]}
+
+
+def review_solution(root, task, author, reviewers, candidates):
+    diff = run(["git", "diff", "--no-ext-diff", "HEAD"], cwd=root).stdout
+    prompt = f"""You are a read-only benchmark judge. Do not edit files. Review the candidate diff
+against the task contract and repository evidence. Passing tests is necessary but not sufficient:
+look for concurrency, aliasing, determinism, rollback, compatibility, and error-path violations.
+TASK:\n{task['prompt']}\nDIFF:\n{diff}\n
+Return exactly one JSON object with numeric 0..10 fields correctness, invariants,
+maintainability, test_quality; integer critical_findings; and concise rationale.
+Do not use MCP, plugins, skills, web search, or other agents."""
+    results = []
+    for key in reviewers:
+        if key == author:
+            continue
+        reviewer = candidates.get(key)
+        if not reviewer:
+            continue
+        cmd = reviewer_command(reviewer, prompt, root)
+        t0 = time.time()
+        try:
+            p = run(cmd.argv, cwd=root, env=cmd.env)
+            parsed = parse_review(p.stdout + "\n" + p.stderr)
+            results.append({"reviewer": key, "exit": p.returncode, "secs": round(time.time()-t0, 2), **parsed})
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            results.append({"reviewer": key, "exit": -1, "score": 0.0, "critical_findings": 1, "error": str(exc)})
+    return results
+
+
+def aggregate(rows):
+    grouped = {}
+    for row in rows:
+        g = grouped.setdefault((row["task"], row["model"]), [])
+        g.append(row)
+    summaries = []
+    for (task, model), rs in grouped.items():
+        passes = [r for r in rs if r["passed"]]
+        review_scores = [x["score"] for r in passes for x in r.get("reviews", []) if not x.get("parse_error")]
+        valid_reviews = [x for r in passes for x in r.get("reviews", []) if not x.get("parse_error")]
+        critical = sum(int(x.get("critical_findings", 0)) for x in valid_reviews)
+        summaries.append({
+            "task": task, "model": model, "attempts": len(rs), "passes": len(passes),
+            "pass_rate": round(len(passes) / len(rs), 4),
+            "review_score": round(statistics.median(review_scores), 3) if review_scores else 0.0,
+            "critical_findings": critical,
+            "review_count": len(valid_reviews),
+            "critical_per_review": round(critical / len(valid_reviews), 4) if valid_reviews else 1.0,
+            "median_secs": round(statistics.median(r["secs"] for r in rs), 2),
+        })
+    return summaries
+
+
+def proposal(summaries):
+    tiers = {}
+    task_by_id = {t["id"]: t for t in TASKS}
+    for tier in sorted({t["difficulty"] for t in TASKS}):
+        task_ids = {t["id"] for t in TASKS if t["difficulty"] == tier}
+        models = sorted({s["model"] for s in summaries})
+        ranked = []
+        for model in models:
+            ss = [s for s in summaries if s["model"] == model and s["task"] in task_ids]
+            if not ss:
+                continue
+            ranked.append({
+                "model": model,
+                "objective_pass_rate": round(sum(s["passes"] for s in ss) / sum(s["attempts"] for s in ss), 4),
+                "mean_review_score": round(sum(s["review_score"] for s in ss) / len(ss), 3),
+                "critical_findings": sum(s["critical_findings"] for s in ss),
+                "review_count": sum(s["review_count"] for s in ss),
+                "critical_per_review": round(
+                    sum(s["critical_findings"] for s in ss) / sum(s["review_count"] for s in ss), 4
+                ) if sum(s["review_count"] for s in ss) else 1.0,
+                "median_secs": round(statistics.median(s["median_secs"] for s in ss), 2),
+            })
+        ranked.sort(key=lambda x: (-x["objective_pass_rate"], x["critical_per_review"], -x["mean_review_score"], x["median_secs"], x["model"]))
+        tiers[tier] = {"winner": ranked[0]["model"] if ranked else None, "ranking": ranked,
+                       "tasks": sorted(task_ids), "ordering": "pass_rate desc, critical_per_review asc, review_score desc, latency asc"}
+    return {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "tiers": tiers,
+            "note": "Advisory calibration only; require repeated runs before changing production routing."}
+
+
+def render_report(meta, summaries, prop):
+    lines = ["# Direct-CLI adversarial routing calibration", "",
+             "No jindo MCP, plugins, skills, or cross-agent implementation was used.", "",
+             f"CLI versions: `{json.dumps(meta['cli_versions'], ensure_ascii=False)}`", "",
+             "## Results", "", "| task | model | pass | review | critical/review | median sec |", "|---|---|---:|---:|---:|---:|"]
+    for s in sorted(summaries, key=lambda x: (x["task"], -x["pass_rate"], -x["review_score"], x["model"])):
+        lines.append(f"| {s['task']} | {s['model']} | {s['passes']}/{s['attempts']} | {s['review_score']:.3f} | {s['critical_per_review']:.3f} | {s['median_secs']:.2f} |")
+    lines += ["", "## Routing proposal", ""]
+    for tier, data in prop["tiers"].items():
+        lines += [f"### {tier}", "", f"Winner: `{data['winner']}`", ""]
+        for i, row in enumerate(data["ranking"], 1):
+            lines.append(f"{i}. `{row['model']}` — pass {row['objective_pass_rate']:.1%}, review {row['mean_review_score']:.3f}, critical/review {row['critical_per_review']:.3f}, {row['median_secs']:.2f}s")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def selected(items, csv, field):
+    if not csv:
+        return items
+    wanted = set(csv.split(","))
+    missing = wanted - {x[field] for x in items}
+    if missing:
+        raise SystemExit(f"unknown {field}: {', '.join(sorted(missing))}")
+    return [x for x in items if x[field] in wanted]
+
 
 def main():
-    os.makedirs(WORKROOT,exist_ok=True)
-    names=os.environ.get("JINDO_BENCH_CONFIGS")
-    configs=[c for c in DEFAULT_CONFIGS if (not names or c["name"] in names.split(","))]
-    cli=Client(); results=[]
-    for task in TASKS:
-        for cfg in configs:
-            print(f"[run] {task['id']:16} x {cfg['name']:13} ...",flush=True)
-            res=run_case(cli,task,cfg)
-            print(f"      -> verified={res['ok']} secs={res['secs']} revisions={res.get('revisions')} status={res.get('status')}",flush=True)
-            results.append({"task":task["id"],"task_type":task["task_type"],"difficulty":task["difficulty"],
-                            "language":task["language"],"config":cfg["name"],**res})
-    cli.close()
-    open(os.path.join(REPO,"bench","results.json"),"w").write(json.dumps(results,indent=2,ensure_ascii=False))
-    report(results)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--list-models", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--self-test-fixtures", action="store_true")
+    ap.add_argument("--models", help="comma-separated inventory keys")
+    ap.add_argument("--tasks", help="comma-separated task ids")
+    ap.add_argument("--reviewers", default=",".join(REVIEWERS))
+    ap.add_argument("--repeats", type=int, default=3)
+    ap.add_argument("--output-dir", type=Path, default=OUT,
+                    help="campaign-specific artifact directory (default: bench/calibration)")
+    ap.add_argument("--skip-review", action="store_true")
+    ap.add_argument("--resume", action="store_true")
+    args = ap.parse_args()
+    models = inventory()
+    meta = {"cli_versions": cli_versions(), "models": models, "agy_discovered": agy_models()}
+    if args.list_models:
+        print(json.dumps(meta, indent=2, ensure_ascii=False)); return
+    models = selected(models, args.models, "key")
+    tasks = selected(TASKS, args.tasks, "id")
+    if args.repeats < 1:
+        raise SystemExit("--repeats must be >= 1")
+    if args.self_test_fixtures:
+        failures = validate_fixtures(tasks)
+        print(json.dumps(failures, indent=2, ensure_ascii=False))
+        raise SystemExit(1 if failures else 0)
+    print(f"matrix: {len(tasks)} tasks x {len(models)} models x {args.repeats} repeats")
+    if args.dry_run:
+        for task in tasks:
+            for model in models:
+                print(task["id"], model["key"], candidate_command(model, "<prompt>", Path("<workdir>")).argv)
+        return
+    out = args.output_dir.resolve()
+    out.mkdir(parents=True, exist_ok=True); WORK.mkdir(parents=True, exist_ok=True)
+    raw_path = out / "results.json"
+    rows = json.loads(raw_path.read_text()) if args.resume and raw_path.exists() else []
+    # A bad candidate solution commonly exits the CLI successfully and fails the
+    # hidden oracle; that is a completed benchmark outcome. Transport, timeout,
+    # and quota failures are retryable and replaced on --resume.
+    done = {(r["task"], r["model"], r["repeat"]) for r in rows if r.get("exit") == 0}
+    candidates = {m["key"]: m for m in inventory()}
+    reviewers = args.reviewers.split(",") if args.reviewers else []
+    for task in tasks:
+        for model in models:
+            for repeat in range(args.repeats):
+                identity = (task["id"], model["key"], repeat)
+                if identity in done:
+                    continue
+                digest = hashlib.sha256("|".join(map(str, identity)).encode()).hexdigest()[:10]
+                root = setup_repo(task, f"{task['id']}-{digest}")
+                prompt = task["prompt"] + "\n\nDo not use MCP, plugins, skills, web search, or other agents. Inspect the repository, implement the smallest coherent fix, and run the visible tests."
+                cmd = candidate_command(model, prompt, root); t0 = time.time()
+                try:
+                    p = run(cmd.argv, cwd=root, env=cmd.env)
+                    exit_code, output, error = p.returncode, (p.stdout + "\n" + p.stderr)[-12000:], None
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    exit_code, output, error = -1, "", str(exc)
+                passed, checks = verify(root, task)
+                row = {"task": task["id"], "difficulty": task["difficulty"], "model": model["key"],
+                       "language": task.get("language"), "task_type": task.get("task_type"),
+                       "prompt_language": task.get("prompt_language", "english"),
+                       "repeat": repeat, "passed": passed, "exit": exit_code, "secs": round(time.time()-t0, 2),
+                       "checks": checks, "output": output, "error": error, "reviews": []}
+                if passed and not args.skip_review:
+                    row["reviews"] = review_solution(root, task, model["key"], reviewers, candidates)
+                rows = [old for old in rows if (old["task"], old["model"], old["repeat"]) != identity]
+                rows.append(row); raw_path.write_text(json.dumps(rows, indent=2, ensure_ascii=False))
+                print(f"{task['id']} x {model['key']} #{repeat}: pass={passed} reviews={len(row['reviews'])}", flush=True)
+                shutil.rmtree(root, ignore_errors=True)
+    summaries = aggregate(rows); prop = proposal(summaries)
+    (out / "summary.json").write_text(json.dumps(summaries, indent=2, ensure_ascii=False))
+    (out / "routing_proposal.json").write_text(json.dumps(prop, indent=2, ensure_ascii=False))
+    (out / "report.md").write_text(render_report(meta, summaries, prop) + "\n")
+    (out / "inventory.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    print(f"wrote {out / 'report.md'}")
 
-def report(results):
-    configs=[]
-    for r in results:
-        if r["config"] not in configs: configs.append(r["config"])
-    lines=["# jindo benchmark — hard suite (codex-only)","",
-           "CODEX-ONLY run (claude/agy tokens exhausted): measures whether JINDO's objective",
-           "verify gate + self-heal (auto-revision) lifts a single agent's verified success on",
-           "HARD tasks vs raw codex. Not a cross-agent routing comparison.","",
-           "## KPI by config","","| config | verified pass | avg secs | avg revisions |","|---|---|---|---|"]
-    rate={}
-    for c in configs:
-        rs=[r for r in results if r["config"]==c]; pv=sum(1 for r in rs if r["ok"]); n=len(rs)
-        rate[c]=pv/n if n else 0
-        lines.append(f"| {c} | {pv}/{n} ({round(100*pv/n) if n else 0}%) | {round(sum(r['secs'] for r in rs)/n,1) if n else 0} | {round(sum(r.get('revisions',0) for r in rs)/n,1) if n else 0} |")
-    # per-task pass table
-    tasks=[]
-    for r in results:
-        if r["task"] not in tasks: tasks.append(r["task"])
-    lines+=["","## per-task verified pass","","| task | "+" | ".join(configs)+" |","|"+"---|"*(len(configs)+1)]
-    for tk in tasks:
-        row=[tk]
-        for c in configs:
-            m=[r for r in results if r["task"]==tk and r["config"]==c]
-            row.append("✓" if (m and m[0]["ok"]) else "✗")
-        lines.append("| "+" | ".join(row)+" |")
-    if "codex_raw" in rate and "codex_verify" in rate:
-        lift=round(100*(rate["codex_verify"]-rate["codex_raw"]))
-        lines+=["",f"## JINDO lift (verify+self-heal vs raw): {lift:+d} percentage points",
-                "Positive => the objective gate + auto-revision recovered failures a single raw dispatch missed."]
-    md="\n".join(lines)
-    open(os.path.join(REPO,"bench","report_hard.md"),"w").write(md+"\n")
-    print("\n"+md,flush=True); print("\n== BENCH DONE ==",flush=True)
 
-if __name__=="__main__": main()
+if __name__ == "__main__":
+    main()

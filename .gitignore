@@ -9,3 +9,10 @@ __pycache__/
 .serena/
 .claude/loop/state/
 .claude/loop/events/
+
+# Keep benchmark fixtures and curated conclusions, not generated run history.
+bench/calibration/**
+!bench/calibration/README.md
+!bench/calibration/*-routing-report.md
+!bench/calibration/*-2026-07-report.md
+!bench/calibration/*_analysis.md

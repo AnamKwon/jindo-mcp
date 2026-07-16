@@ -1,0 +1,377 @@
+{
+  "schema_version": 2,
+  "evidence_snapshot": "2026-07-15",
+  "evidence_scope": {
+    "status": "mixed_local_direct_cli_calibration",
+    "measured_domain": "coding_and_image_free_hle_screening",
+    "measured_language": ["go", "python", "rust", "javascript", "java", "sql", "cpp", "c", "swift", "shell"],
+    "measured_task_types": ["concurrency_fencing", "stateful_transaction", "migration_durability", "async_singleflight_cache", "optimistic_atomic_store", "bounded_keyed_scheduler", "deterministic_dependency_planner", "bitemporal_ledger_report", "raii_reentrant_observer_registry", "api_debugging_retry_semantics", "numerical_exact_apportionment", "multifile_transaction_refactor", "security_archive_path_validation", "memory_safe_incremental_parser", "actor_isolation_atomic_batch", "quoting_atomic_file_reconciliation", "contract_mutation_test_generation", "concurrency_fencing_test_generation"],
+    "reviewer_accuracy": "20_labeled_cases_3_repeats",
+    "warning": "Do not infer language, subject, or reviewer superiority outside the measured cells."
+  },
+  "host_selection": {
+    "owner": "host",
+    "candidate_order": "benchmark_prior_not_execution_order",
+    "required_considerations": ["task_shape_fit", "invariant_and_risk_density", "oracle_strength", "scope_and_context_size", "repeatability", "review_findings", "latency_and_cost", "operational_failures"],
+    "single_model_when": ["one candidate has directly relevant repeated evidence", "the objective oracle is strong enough to reject a bad result", "the change is bounded and reversible"],
+    "multi_model_when": ["evidence is unstable or tied", "the task is ambiguous or high stakes", "the oracle is weak or absent", "candidate strengths address different failure modes"],
+    "selection_record": ["chosen_model_or_models", "task_fit", "benchmark_evidence_used", "known_uncertainty", "verification_and_review_plan"]
+  },
+  "model_evidence": {
+    "gpt-5.6-luna": {"observed_strengths": ["small tier passed hard exact-numerical and selected contract cells", "useful low-cost Codex candidate for bounded work"], "cautions": ["Python contract test generation was 1/3", "do not transfer a one-off hard-cell pass across task types"], "operational_profile": "small_fast"},
+    "gpt-5.6-terra": {"observed_strengths": ["repeated clean Go retry, JavaScript security, scheduler, and Swift evidence", "top calibrated reviewer cohort"], "cautions": ["some test-generation cells were slow or only screened once", "subject-level HLE results vary"], "operational_profile": "balanced_quality"},
+    "gpt-5.6-sol": {"observed_strengths": ["frontier fallback for unmeasured high-risk work"], "cautions": ["no local exact-cell promotion", "test-generation campaigns contained failures and a long timeout"], "operational_profile": "large_slow"},
+    "gpt-5.3-codex-spark": {"observed_strengths": ["fast repeated Java dependency planning", "strong C and Bash repeat screens"], "cautions": ["C and Bash fresh generations failed", "Go test generation was 2/3"], "operational_profile": "coding_fast"},
+    "gpt-5.5": {"observed_strengths": ["strong hard-coding prior and reviewed Rust fallback"], "cautions": ["Python contract test generation was 2/3", "corrected Go test-generation screen failed"], "operational_profile": "large_quality"},
+    "claude-haiku-4-5": {"observed_strengths": ["small model showed strong SQL and selected systems screens", "fast Claude option for bounded work"], "cautions": ["stability changed across prompt language and fresh runs", "corrected Go test-generation screen failed"], "operational_profile": "small_fast"},
+    "claude-sonnet-5": {"observed_strengths": ["balanced implementation candidate on Python async and transactional work"], "cautions": ["not the reviewed leader in measured general-coding cells", "both new test-generation screens failed"], "operational_profile": "balanced"},
+    "claude-opus-4-8": {"observed_strengths": ["review-selected C++ RAII leader", "clean JavaScript security evidence", "corrected Go test generation passed 3/3"], "cautions": ["Go test-generation fresh author run exceeded 300 seconds", "higher cost and latency"], "operational_profile": "large_deep"},
+    "claude-fable-5": {"observed_strengths": ["top-tier fallback", "top calibrated reviewer cohort"], "cautions": ["limited local author-cell repetitions compared with other candidates"], "operational_profile": "large_deep"},
+    "Gemini 3.5 Flash (Low)": {"observed_strengths": ["fast repeated wins across Python async, Rust, SQL, and selected Java work", "corrected Go test generation passed 3/3 plus fresh objective gate"], "cautions": ["Go test-generation review exposed unseeded gaps", "security and multi-file cells still require calibration gates"], "operational_profile": "small_very_fast"},
+    "Gemini 3.5 Flash (Medium)": {"observed_strengths": ["top calibrated reviewer cohort", "stronger local biology, chemistry, and physics HLE screens than Terra"], "cautions": ["HLE evidence is single-repeat with transport omissions", "author coding evidence is narrower"], "operational_profile": "fast_balanced"},
+    "Gemini 3.5 Flash (High)": {"observed_strengths": ["repeated clean Swift finalist", "hard Go test-generation screens passed"], "cautions": ["Python contract test generation was 2/3", "higher effort did not guarantee stability"], "operational_profile": "fast_high_effort"},
+    "Gemini 3.1 Pro (Low)": {"observed_strengths": ["observed Go stateful-transaction leader"], "cautions": ["route rests on single-repeat evidence"], "operational_profile": "pro_balanced"},
+    "Gemini 3.1 Pro (High)": {"observed_strengths": ["broad high-context fallback", "corrected Go test-generation screen passed"], "cautions": ["not repeated as the finalist in that cell", "do not infer a global hard-task win"], "operational_profile": "pro_deep"}
+  },
+  "measured_routes": [
+    {
+      "domain": "coding", "language": "go", "task_type": "concurrency_fencing",
+      "mode": "cascade", "evidence_status": "measured_single_repeat", "calibration_required": true,
+      "candidates": [
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Low)", "effort": "low"},
+        {"agent": "codex", "model": "gpt-5.3-codex-spark", "effort": "high"},
+        {"agent": "codex", "model": "gpt-5.5", "effort": "high"}
+      ],
+      "required_oracle": ["race_or_stress_test", "invariant_tests"],
+      "evidence": "local_direct_cli_single_repeat"
+    },
+    {
+      "domain": "coding", "language": "go", "task_type": "stateful_transaction",
+      "mode": "cascade", "evidence_status": "measured_single_repeat", "calibration_required": true,
+      "candidates": [
+        {"agent": "agy", "model": "Gemini 3.1 Pro (Low)", "effort": "medium"},
+        {"agent": "claude", "model": "claude-sonnet-5", "effort": "high"},
+        {"agent": "codex", "model": "gpt-5.5", "effort": "high"}
+      ],
+      "required_oracle": ["replay_and_conflict_tests", "conservation_tests", "race_test"],
+      "evidence": "local_direct_cli_single_repeat"
+    },
+    {
+      "domain": "coding", "language": "go", "task_type": "migration_durability",
+      "mode": "cascade", "evidence_status": "measured_single_repeat", "calibration_required": true,
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.5", "effort": "high"},
+        {"agent": "codex", "model": "gpt-5.6-sol", "effort": "high"},
+        {"agent": "claude", "model": "claude-fable-5", "effort": "high"}
+      ],
+      "required_oracle": ["compatibility_tests", "failure_atomicity_tests", "filesystem_safety_tests"],
+      "evidence": "local_direct_cli_single_repeat"
+    },
+    {
+      "domain": "coding", "language": "python", "task_type": "async_singleflight_cache",
+      "mode": "cascade", "evidence_status": "measured_repeated_fixture", "calibration_required": true,
+      "reason": "three direct-CLI repeats on cancellation isolation, single-flight, failure retry, generation fencing, TTL, and cross-key concurrency",
+      "candidates": [
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Low)", "effort": "low"},
+        {"agent": "claude", "model": "claude-sonnet-5", "effort": "high"},
+        {"agent": "codex", "model": "gpt-5.5", "effort": "high"}
+      ],
+      "required_oracle": ["async_concurrency_tests", "cancellation_and_failure_tests", "generation_fencing_tests"],
+      "evidence": "local_direct_cli_three_repeats"
+    },
+    {
+      "domain": "coding", "language": "rust", "task_type": "optimistic_atomic_store",
+      "mode": "cascade", "evidence_status": "measured_repeated_fixture", "calibration_required": true,
+      "reason": "Flash Low passed 3/3 fastest; calibrated review moved GPT-5.5 ahead of Sonnet because Sonnet used an unchecked version increment",
+      "candidates": [
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Low)", "effort": "low"},
+        {"agent": "codex", "model": "gpt-5.5", "effort": "high"},
+        {"agent": "claude", "model": "claude-sonnet-5", "effort": "high"}
+      ],
+      "required_oracle": ["cargo_hidden_tests", "rollback_and_overflow_tests", "concurrency_and_poison_tests"],
+      "evidence": "local_direct_cli_three_repeats"
+    },
+    {
+      "domain": "coding", "language": "javascript", "task_type": "bounded_keyed_scheduler",
+      "mode": "cascade", "evidence_status": "measured_repeated_fixture", "calibration_required": true,
+      "reason": "Terra passed 3/3; Spark and Opus each passed 2/3 while the screened Flash variants failed",
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+        {"agent": "codex", "model": "gpt-5.5", "effort": "high"},
+        {"agent": "claude", "model": "claude-fable-5", "effort": "high"}
+      ],
+      "required_oracle": ["event_loop_order_tests", "abort_and_capacity_tests", "repeatability_gate"]
+    },
+    {
+      "domain": "coding", "language": "java", "task_type": "deterministic_dependency_planner",
+      "mode": "cascade", "evidence_status": "measured_repeated_fixture", "calibration_required": true,
+      "reason": "Spark passed 3/3 fastest; Flash Low also passed 3/3 with higher clean review scores than the other alternatives",
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.3-codex-spark", "effort": "high"},
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Low)", "effort": "low"},
+        {"agent": "claude", "model": "claude-opus-4-8", "effort": "high"}
+      ],
+      "required_oracle": ["cycle_and_missing_dependency_tests", "determinism_tests", "input_immutability_tests"]
+    },
+    {
+      "domain": "coding", "language": "java", "prompt_language": "korean", "task_type": "deterministic_dependency_planner",
+      "mode": "cascade", "evidence_status": "measured_repeated_paired_prompt", "calibration_required": true,
+      "reason": "On the Korean paired prompt Spark, Opus, Terra, and Haiku all passed 3/3; Spark was fastest",
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.3-codex-spark", "effort": "high"},
+        {"agent": "claude", "model": "claude-opus-4-8", "effort": "high"},
+        {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"}
+      ],
+      "required_oracle": ["cycle_and_missing_dependency_tests", "determinism_tests", "input_immutability_tests"]
+    },
+    {
+      "domain": "coding", "language": "sql", "task_type": "bitemporal_ledger_report",
+      "mode": "cascade", "evidence_status": "measured_repeated_fixture", "calibration_required": true,
+      "reason": "Flash Low and Haiku passed 3/3 with clean reviews; Flash Low had the lower repeated latency",
+      "candidates": [
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Low)", "effort": "low"},
+        {"agent": "claude", "model": "claude-haiku-4-5", "effort": "low"},
+        {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"}
+      ],
+      "required_oracle": ["fixture_result_equality", "as_of_and_ingestion_boundary_tests", "null_and_zero_account_tests"]
+    },
+    {
+      "domain": "coding", "language": "sql", "prompt_language": "korean", "task_type": "bitemporal_ledger_report",
+      "mode": "cascade", "evidence_status": "measured_repeated_paired_prompt", "calibration_required": true,
+      "reason": "On the Korean paired prompt Spark passed 3/3 while Haiku fell from English 3/3 to Korean 1/3",
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.3-codex-spark", "effort": "high"},
+        {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+        {"agent": "claude", "model": "claude-opus-4-8", "effort": "high"}
+      ],
+      "required_oracle": ["fixture_result_equality", "as_of_and_ingestion_boundary_tests", "null_and_zero_account_tests"]
+    },
+    {
+      "domain": "coding", "language": "cpp", "task_type": "raii_reentrant_observer_registry",
+      "mode": "cascade", "evidence_status": "measured_repeated_fixture", "calibration_required": true,
+      "reason": "Spark and Opus passed 3/3, but calibrated review found two critical latent defects in the Spark patch and none in Opus",
+      "candidates": [
+        {"agent": "claude", "model": "claude-opus-4-8", "effort": "high"},
+        {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+        {"agent": "codex", "model": "gpt-5.3-codex-spark", "effort": "high"}
+      ],
+      "required_oracle": ["raii_move_lifetime_tests", "reentrant_callback_tests", "exception_and_deadlock_tests"]
+    },
+    {
+      "domain": "coding", "language": "go", "task_type": "api_debugging_retry_semantics",
+      "mode": "cascade", "evidence_status": "measured_repeated_reviewed_fixture", "calibration_required": true,
+      "reason": "Terra, Flash Low, and Sonnet each passed 3/3 plus a fresh reviewed run; review found no critical defects in Terra, one in Flash Low, and two in Sonnet, so review quality overrides latency",
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Low)", "effort": "low"},
+        {"agent": "claude", "model": "claude-sonnet-5", "effort": "high"}
+      ],
+      "required_oracle": ["request_body_replay_tests", "retry_and_response_ownership_tests", "retry_after_and_context_tests"],
+      "evidence": "local_direct_cli_three_repeats_plus_fresh_cross_model_review"
+    },
+    {
+      "domain": "coding", "language": "python", "task_type": "contract_mutation_test_generation",
+      "mode": "parallel_compare", "evidence_status": "measured_repeated_generation_unstable", "calibration_required": true,
+      "reason": "No finalist passed all three mutation-scored generations: Flash High and GPT-5.5 passed 2/3, while Luna passed 1/3; no candidate was eligible for fresh review",
+      "candidates": [
+        {"agent": "agy", "model": "Gemini 3.5 Flash (High)", "effort": "high"},
+        {"agent": "codex", "model": "gpt-5.5", "effort": "high"},
+        {"agent": "codex", "model": "gpt-5.6-luna", "effort": "high"}
+      ],
+      "required_oracle": ["correct_implementation_pass", "contract_mutation_kill_set", "repeatability_gate"],
+      "evidence": "local_direct_cli_three_repeats_without_stable_finalist"
+    },
+    {
+      "domain": "coding", "language": "go", "task_type": "concurrency_fencing_test_generation",
+      "mode": "parallel_compare", "evidence_status": "measured_v2_repeated_reviewed_but_not_promotable", "calibration_required": true,
+      "reason": "On corrected v2, Opus and Flash Low passed 3/3. Opus had fewer review-critical gaps but its fresh CLI run timed out; Flash Low completed fresh verification but reviewers found more latent gaps. Spark passed 2/3. No candidate met the promotion gate",
+      "candidates": [
+        {"agent": "claude", "model": "claude-opus-4-8", "effort": "high"},
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Low)", "effort": "low"},
+        {"agent": "codex", "model": "gpt-5.3-codex-spark", "effort": "high"}
+      ],
+      "required_oracle": ["go_race_test", "fencing_and_owner_mutation_kill_set", "snapshot_value_and_alias_mutation_kill_set", "fresh_cross_model_review"],
+      "evidence": "local_direct_cli_corrected_v2_three_repeats_plus_fresh_cross_model_review"
+    },
+    {
+      "domain": "coding", "language": "python", "task_type": "numerical_exact_apportionment",
+      "mode": "cascade", "evidence_status": "measured_repeated_reviewed_fixture", "calibration_required": true,
+      "reason": "Flash Low, Luna, and Sonnet each passed 3/3 plus a clean fresh reviewed run; Flash Low had the highest clean review median and lowest latency",
+      "candidates": [
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Low)", "effort": "low"},
+        {"agent": "codex", "model": "gpt-5.6-luna", "effort": "high"},
+        {"agent": "claude", "model": "claude-sonnet-5", "effort": "high"}
+      ],
+      "required_oracle": ["exact_decimal_tests", "huge_integer_and_exponent_tests", "signed_conservation_and_tie_tests"],
+      "evidence": "local_direct_cli_three_repeats_plus_fresh_cross_model_review"
+    },
+    {
+      "domain": "coding", "language": "java", "task_type": "multifile_transaction_refactor",
+      "mode": "cascade", "evidence_status": "measured_repeated_reviewed_fixture", "calibration_required": true,
+      "reason": "Flash Low passed 4/5 independent generations and its latest passing patch received three clean reviews; Luna passed 2/3 and Sonnet 1/3, so every candidate remains a calibration-gated fallback",
+      "candidates": [
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Low)", "effort": "low"},
+        {"agent": "codex", "model": "gpt-5.6-luna", "effort": "high"},
+        {"agent": "claude", "model": "claude-sonnet-5", "effort": "high"}
+      ],
+      "required_oracle": ["multifile_build_and_hidden_tests", "optimistic_conflict_and_retry_tests", "idempotency_overflow_and_immutability_tests"],
+      "evidence": "local_direct_cli_repeats_plus_fresh_cross_model_review"
+    },
+    {
+      "domain": "coding", "language": "javascript", "task_type": "security_archive_path_validation",
+      "mode": "cascade", "evidence_status": "measured_repeated_reviewed_fixture", "calibration_required": true,
+      "reason": "Terra, Opus, and Flash Low each passed the corrected v2 fixture 3/3 plus a fresh run; review found zero critical defects for Terra and Opus but two latent validation defects in Flash Low, and Terra had the stronger clean review median",
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+        {"agent": "claude", "model": "claude-opus-4-8", "effort": "high"},
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Low)", "effort": "low"}
+      ],
+      "required_oracle": ["lexical_path_and_target_tests", "archive_hierarchy_and_duplicate_tests", "type_purity_and_sparse_input_tests"],
+      "evidence": "local_direct_cli_v2_three_repeats_plus_fresh_cross_model_review"
+    },
+    {
+      "domain": "coding", "language": "c", "task_type": "memory_safe_incremental_parser",
+      "mode": "parallel_compare", "evidence_status": "measured_repeated_fresh_generation_unstable", "calibration_required": true,
+      "reason": "Spark and Haiku passed the sanitizer-backed fixture 3/3 but both failed a fresh generation before review; Flash Low passed 2/3, so no candidate is stable enough for cascade promotion",
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.3-codex-spark", "effort": "high"},
+        {"agent": "claude", "model": "claude-haiku-4-5", "effort": "high"},
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Low)", "effort": "low"}
+      ],
+      "required_oracle": ["c11_werror_build", "address_and_undefined_behavior_sanitizers", "chunk_boundary_and_sticky_failure_tests"],
+      "evidence": "local_direct_cli_three_repeats_plus_failed_fresh_generation"
+    },
+    {
+      "domain": "coding", "language": "swift", "task_type": "actor_isolation_atomic_batch",
+      "mode": "cascade", "evidence_status": "measured_repeated_reviewed_fixture", "calibration_required": true,
+      "reason": "Terra and Flash High each passed 3/3 plus a fresh reviewed Swift 6 strict-concurrency run with zero critical defects; Terra had the stronger clean review median, while Haiku fell to 1/3",
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+        {"agent": "agy", "model": "Gemini 3.5 Flash (High)", "effort": "high"},
+        {"agent": "claude", "model": "claude-opus-4-8", "effort": "high"}
+      ],
+      "required_oracle": ["swift6_strict_concurrency_build", "atomic_rollback_and_idempotency_tests", "checked_arithmetic_and_concurrent_serializability_tests"],
+      "evidence": "local_direct_cli_three_repeats_plus_fresh_cross_model_review"
+    },
+    {
+      "domain": "coding", "language": "shell", "task_type": "quoting_atomic_file_reconciliation",
+      "mode": "parallel_compare", "evidence_status": "measured_v2_repeated_fresh_generation_unstable", "calibration_required": true,
+      "reason": "The v1 fixture was invalidated by review. On the corrected Bash 3.2 v2, Spark passed 3/3 but failed its fresh generation; Haiku and Flash Low each passed only 1/3, so the host must compare and verify rather than promote a default",
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.3-codex-spark", "effort": "high"},
+        {"agent": "codex", "model": "gpt-5.6-luna", "effort": "high"},
+        {"agent": "claude", "model": "claude-opus-4-8", "effort": "high"}
+      ],
+      "required_oracle": ["macos_bash_3_2_execution", "literal_and_key_order_tests", "symlink_atomicity_permissions_and_failure_tests"],
+      "evidence": "local_direct_cli_corrected_v2_repeats_plus_failed_fresh_generation"
+    },
+    {
+      "domain": "mathematics", "language": "", "task_type": "multiple_choice",
+      "mode": "parallel_compare", "evidence_status": "measured_20_items_single_repeat", "calibration_required": true,
+      "reason": "Terra scored 7/20 versus Flash Medium 6/20; single-repeat HLE evidence requires independent comparison",
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Medium)", "effort": "medium"},
+        {"agent": "claude", "model": "claude-opus-4-8", "effort": "high"}
+      ],
+      "required_oracle": ["exact_answer_scoring", "item_level_retention"]
+    },
+    {
+      "domain": "biology", "language": "", "task_type": "multiple_choice",
+      "mode": "parallel_compare", "evidence_status": "measured_20_items_single_repeat", "calibration_required": true,
+      "reason": "Flash Medium scored 8/20 versus Terra 3/20; single-repeat HLE evidence and transport failures forbid single-model promotion",
+      "candidates": [
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Medium)", "effort": "medium"},
+        {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+        {"agent": "claude", "model": "claude-fable-5", "effort": "high"}
+      ],
+      "required_oracle": ["exact_answer_scoring", "item_level_retention"]
+    },
+    {
+      "domain": "physics", "language": "", "task_type": "multiple_choice",
+      "mode": "parallel_compare", "evidence_status": "measured_20_items_single_repeat", "calibration_required": true,
+      "reason": "Flash Medium scored 6/20 versus Terra 5/20; the small gap remains a provider-diverse tie",
+      "candidates": [
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Medium)", "effort": "medium"},
+        {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+        {"agent": "claude", "model": "claude-opus-4-8", "effort": "high"}
+      ],
+      "required_oracle": ["exact_answer_scoring", "item_level_retention"]
+    },
+    {
+      "domain": "chemistry", "language": "", "task_type": "multiple_choice",
+      "mode": "parallel_compare", "evidence_status": "measured_20_items_single_repeat", "calibration_required": true,
+      "reason": "Flash Medium scored 5/20 versus Terra 2/20; single-repeat evidence requires comparison",
+      "candidates": [
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Medium)", "effort": "medium"},
+        {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+        {"agent": "claude", "model": "claude-fable-5", "effort": "high"}
+      ],
+      "required_oracle": ["exact_answer_scoring", "item_level_retention"]
+    },
+    {
+      "domain": "computer_science_theory", "language": "", "task_type": "multiple_choice",
+      "mode": "parallel_compare", "evidence_status": "measured_20_items_single_repeat", "calibration_required": true,
+      "reason": "Terra scored 8/20 versus Flash Medium 4/20; single-repeat evidence requires comparison",
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Medium)", "effort": "medium"},
+        {"agent": "claude", "model": "claude-fable-5", "effort": "high"}
+      ],
+      "required_oracle": ["exact_answer_scoring", "item_level_retention"]
+    },
+    {
+      "domain": "history_humanities", "language": "", "task_type": "multiple_choice",
+      "mode": "parallel_compare", "evidence_status": "measured_20_items_single_repeat", "calibration_required": true,
+      "reason": "Terra and Flash Medium tied at 8/20; no single-model winner exists",
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Medium)", "effort": "medium"},
+        {"agent": "claude", "model": "claude-fable-5", "effort": "high"}
+      ],
+      "required_oracle": ["exact_answer_scoring", "item_level_retention"]
+    }
+  ],
+  "fallbacks": {
+    "coding_mechanical": {
+      "candidates": [
+        {"agent": "agy", "model": "Gemini 3.5 Flash (Low)", "effort": "low"},
+        {"agent": "claude", "model": "claude-haiku-4-5", "effort": "low"},
+        {"agent": "codex", "model": "gpt-5.6-luna", "effort": "low"}
+      ],
+      "evidence": "tier_prior_not_language_calibrated"
+    },
+    "coding_unmeasured": {
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.3-codex-spark", "effort": "high"},
+        {"agent": "claude", "model": "claude-sonnet-5", "effort": "high"},
+        {"agent": "agy", "model": "Gemini 3.1 Pro (High)", "effort": "high"}
+      ],
+      "evidence": "provider_diverse_general_coding_prior_only"
+    },
+    "noncoding_unmeasured": {
+      "candidates": [
+        {"agent": "codex", "model": "gpt-5.6-sol", "effort": "high"},
+        {"agent": "agy", "model": "Gemini 3.1 Pro (High)", "effort": "high"},
+        {"agent": "claude", "model": "claude-fable-5", "effort": "high"}
+      ],
+      "evidence": "diverse_frontier_fallback_not_a_strength_ranking"
+    }
+  },
+  "review_policy": {
+    "status": "measured_20_cases_3_repeats",
+    "pool": [
+      {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+      {"agent": "agy", "model": "Gemini 3.5 Flash (Medium)", "effort": "medium"},
+      {"agent": "claude", "model": "claude-fable-5", "effort": "high"}
+    ]
+  },
+  "calibration_backlog": {
+    "coding_languages": ["python", "typescript_javascript", "rust", "c", "cpp", "java_kotlin", "sql", "shell", "swift"],
+    "coding_task_types": ["debugging", "multi_file_refactor", "api_upgrade", "performance", "distributed_systems", "security", "frontend", "data_pipeline", "numerical_code", "test_generation"],
+    "noncoding_domains": ["mathematics", "physics", "chemistry", "biology", "computer_science_theory", "medicine", "law", "history_humanities", "social_science", "general_knowledge"],
+    "reasoning_forms": ["exact_calculation", "formal_proof", "multiple_choice", "short_answer", "long_form_explanation", "source_grounded_synthesis", "chart_table_image_reasoning"],
+    "prompt_languages": ["korean", "english", "japanese", "multilingual_mixed"],
+    "review_mutations": ["subtle_contract_violation", "false_positive_trap", "concurrency_bug", "security_bug", "numerical_edge_case", "citation_error", "correct_but_unusual_solution"]
+  }
+}

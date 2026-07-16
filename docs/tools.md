@@ -10,7 +10,8 @@ descriptions live in the tool definitions in `internal/mcp/mcp.go`.
 
 | tool | description (first sentence) |
 |------|------------------------------|
-| `dispatch` | Route a coding task to the right agent/model and run it. |
+| `route_capability` | Return decision support for an explicit capability cell without running a model: benchmark-bounded candidates, per-model observations/cautions, uncertainty, oracle checks, reviewer policy, and the host selection contract. |
+| `dispatch` | Run one explicitly selected model. |
 | `dispatch_async` | Dispatch a coding task in the background and return immediately with a job_id (does not wait for the result). |
 | `dispatch_multi` | Fan a task out to multiple models concurrently in read-only "propose" mode: each model returns its OWN complete candidate solution. |
 | `dispatch_multi_async` | Async variant of dispatch_multi: fan a task out to multiple models concurrently in read-only "propose" mode and return immediately with a job_id instead of waiting for every candidate to finish. |

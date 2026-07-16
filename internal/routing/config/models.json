@@ -3,10 +3,10 @@
     "claude": {
       "trivial": "claude-haiku-4-5",
       "standard": "claude-sonnet-5",
-      "hard": "claude-opus-4-8"
+      "hard": "claude-fable-5"
     },
     "codex": {
-      "trivial": "gpt-5.4-mini",
+      "trivial": "gpt-5.6-luna",
       "standard": "gpt-5.3-codex-spark",
       "hard": "gpt-5.5"
     },
@@ -20,6 +20,12 @@
     "trivial": "agy",
     "standard": "claude",
     "hard": "codex"
+  },
+  "legacy_models": {
+    "claude-opus-4-8": {"agent": "claude", "tier": "hard"},
+    "gpt-5.4-mini": {"agent": "codex", "tier": "trivial"},
+    "gpt-5.6-terra": {"agent": "codex", "tier": "standard"},
+    "gpt-5.6-sol": {"agent": "codex", "tier": "hard"}
   },
   "effort_by_difficulty": {
     "trivial": "low",

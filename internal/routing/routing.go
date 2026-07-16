@@ -66,12 +66,21 @@ type profile struct {
 	CostRank int                `json:"cost_rank"`
 }
 
+// legacyModel keeps an explicitly pinnable model resolvable after a routing
+// slot advances to a newer default. It does not participate in automatic
+// selection; it only preserves the explicit-model compatibility contract.
+type legacyModel struct {
+	Agent string `json:"agent"`
+	Tier  string `json:"tier"`
+}
+
 // models is the parsed models.json: per-agent tier->model tables, the default
 // agent per difficulty, and optional per-agent capability profiles that drive
 // intra-tier agent selection.
 type models struct {
 	Agents                   map[string]map[string]string `json:"agents"`
 	DefaultAgentByDifficulty map[string]string            `json:"default_agent_by_difficulty"`
+	LegacyModels             map[string]legacyModel       `json:"legacy_models"`
 	// EffortByDifficulty maps a difficulty tier (trivial/standard/hard) to the
 	// reasoning-effort level dispatched with that tier's work by default (see
 	// EffortForDifficulty). It is a separate dispatch dimension from the model —
@@ -763,7 +772,11 @@ func SelectModel(task string, agent string, priority string, model string) (Sele
 				}
 			}
 			if len(matches) == 0 {
-				return Selection{}, fmt.Errorf("routing: cannot infer agent for model %q; pass agent explicitly", model)
+				legacy, ok := loadedModels.LegacyModels[model]
+				if !ok {
+					return Selection{}, fmt.Errorf("routing: cannot infer agent for model %q; pass agent explicitly", model)
+				}
+				matches = append(matches, legacy.Agent)
 			}
 			sort.Strings(matches)
 			resolvedAgent = matches[0]
@@ -790,6 +803,11 @@ func SelectModel(task string, agent string, priority string, model string) (Sele
 			if tiers[tier] == model {
 				label = tier
 				break
+			}
+		}
+		if label == "explicit" {
+			if legacy, ok := loadedModels.LegacyModels[model]; ok && legacy.Agent == resolvedAgent {
+				label = legacy.Tier
 			}
 		}
 		rationale.Tier = label

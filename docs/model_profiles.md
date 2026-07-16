@@ -1,6 +1,6 @@
 # Per-Model Capability Profiles
 
-Refreshed 2026-07-01. This document is the human-readable rationale behind
+Refreshed 2026-07-13. This document is the human-readable rationale behind
 [`jindo/config/model_profiles.json`](../jindo/config/model_profiles.json), the
 machine-readable per-model profile the router/eval layer consumes. It must be kept in
 sync with that JSON and with [`jindo/config/models.json`](../jindo/config/models.json),
@@ -20,18 +20,17 @@ inferred from vendor pages):
 
 | Agent | CLI | Model flag | Accepted models |
 |---|---|---|---|
-| `claude` | Claude Code 2.1.191 | `--model` | aliases `opus` / `sonnet` plus a `fable` alias, and full names e.g. `claude-opus-4-8`. A `fable` alias is listed by the CLI, but **Fable 5 (`claude-fable-5`) is currently blocked/unavailable**, so the top usable Claude model is **Opus 4.8**. Usable lineup now: **Opus 4.8** (`claude-opus-4-8`), **Sonnet 5** (`claude-sonnet-5` — the `sonnet` alias now resolves here), **Haiku 4.5** (`claude-haiku-4-5`). |
-| `codex` | codex-cli 0.142.1 | `--model` | default configured `gpt-5.5` (in `~/.codex/config.toml`). Lineup: `gpt-5.5`, `gpt-5.3-codex-spark`, `gpt-5.4-mini`. **Note:** the bare `gpt-5.3-codex` id 400s on this ChatGPT-plan account ("not supported when using Codex with a ChatGPT account") — `-spark` is the id actually served. |
-| `agy` (Gemini) | gemini CLI 0.46.0 | `-m` | `gemini-3.1-pro`, `gemini-3.5-flash`. |
+| `claude` | Claude Code 2.1.207 | `--model` | Live benchmark accepted Fable 5, Opus 4.8, Sonnet 5, and Haiku 4.5. Fable 5 is now the routed hard default; Opus remains explicitly pinnable through the legacy-model compatibility table. |
+| `codex` | codex-cli 0.144.2 | `--model` | Live benchmark accepted GPT-5.6 Sol/Terra/Luna plus GPT-5.5, GPT-5.3 Codex Spark, and GPT-5.4 mini. Luna replaces mini in the trivial slot; mini remains explicitly pinnable. |
+| `agy` (Gemini) | agy 1.1.1 | `--model` | Live inventory exposed Gemini 3.5 Flash Low/Medium/High and Gemini 3.1 Pro Low/High. |
 
 Probe evidence: the `claude` CLI `--model` accepts the aliases `opus`/`sonnet` and a
 `fable` alias, and full names such as `claude-opus-4-8`; the `codex` CLI default is
 `gpt-5.5` (confirmed in `~/.codex/config.toml`); the `gemini` CLI selects with `-m`.
 
-**A `fable` alias is listed by the Claude CLI, but Fable 5 (`claude-fable-5`) is
-currently blocked/unavailable**, so the top usable Claude model is **Opus 4.8**. The
-usable Claude lineup is Opus 4.8, Sonnet 5, and Haiku 4.5 — all wired into
-`jindo/config/models.json` routing.
+Fable 5 and the GPT-5.6 family were exercised through their installed CLIs in
+the campaign-specific `bench/calibration/*/results.json` artifacts; this local
+execution evidence supersedes the earlier availability note.
 
 ## How this differs from model_policy.md
 
@@ -63,8 +62,8 @@ naming (earlier ambiguity resolved) — treat the number as an ordering signal o
 
 | Agent | trivial | standard | hard |
 |---|---|---|---|
-| `claude` | `claude-haiku-4-5` | `claude-sonnet-5` | `claude-opus-4-8` |
-| `codex` | `gpt-5.4-mini` | `gpt-5.3-codex-spark` | `gpt-5.5` |
+| `claude` | `claude-haiku-4-5` | `claude-sonnet-5` | `claude-fable-5` |
+| `codex` | `gpt-5.6-luna` | `gpt-5.3-codex-spark` | `gpt-5.5` |
 | `agy` | `gemini-3.5-flash` | `gemini-3.1-pro` | `gemini-3.1-pro` |
 
 `gemini-3.1-pro` occupies **both** agy standard and agy hard. It is recorded once in the

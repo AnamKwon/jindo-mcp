@@ -13,6 +13,10 @@ human-readable rationale and must be kept in sync with it.
 | Anthropic | Haiku 4.5 (`claude-haiku-4-5`) | ~73.3% | 1.00 / 5.00 | Fastest | Cheap/fast triage, classification, formatting, IDE-style edits; "indistinguishable from Sonnet" on shallow tasks | Falls behind on multi-file reasoning and long agent runs |
 | Anthropic | Sonnet 5 (`claude-sonnet-5`) | ~82.1% (reported) | 3.00 / 15.00 | Fast | Near-Opus-tier coding/agentic quality at Sonnet cost; first Sonnet-tier model past 80% Verified; adaptive thinking + full effort range by default | Not the top scorer on the hardest agentic problems; new tokenizer uses ~30% more tokens than Sonnet 4.6 |
 | Anthropic | Opus 4.8 (`claude-opus-4-8`) | ~88.6% (official) | 5.00 / 25.00 | Slower | Hardest reasoning, long-horizon multi-step planning, multi-file refactors, novel problems | Most expensive; overkill for routine work |
+| Anthropic | Fable 5 (`claude-fable-5`) | frontier | premium | Slower | Current Claude capability ceiling for long, difficult software work | Conservative cyber safeguards can redirect some requests |
+| OpenAI | GPT-5.6 Luna (`gpt-5.6-luna`) | current small tier | 1.00 / 6.00 | Fast | Smallest GPT-5.6 tier; passed all three local adversarial fixtures with fewer review findings than GPT-5.4 mini | Still needs verification on high-risk migration and concurrency work |
+| OpenAI | GPT-5.6 Terra (`gpt-5.6-terra`) | current balanced tier | 2.50 / 15.00 | Moderate | Better local review profile than prior small/mid Codex candidates | Spark remained much faster in this local coding suite |
+| OpenAI | GPT-5.6 Sol (`gpt-5.6-sol`) | current flagship | 5.00 / 30.00 | Moderate | Latest OpenAI frontier coding model | GPT-5.5 had the cleanest local review result, so remains the conservative hard default pending repeats |
 | OpenAI | GPT-5.4 mini (`gpt-5.4-mini`) | (light-task tier) | ~one-third of GPT-5.4 quota | Fast | Faster, lower-cost option for lighter coding tasks and subagents; Codex delegates simple work here | Less capable; not for hard agentic coding |
 | OpenAI | GPT-5.3-Codex Spark (`gpt-5.3-codex-spark`) | ~85.0% | 1.75 / 14.00 | Fast | "Most capable agentic coding model to date" — frontier coding + reasoning fused | Codex-specialized; non-coding knowledge work better on GPT-5.5; base `gpt-5.3-codex` id 400s on ChatGPT-plan accounts, use the `-spark` id |
 | OpenAI | GPT-5.5 (`gpt-5.5`) | ~88.7% (reported) | (premium tier) | Slower | Strongest all-round for complex coding, computer use, research; OpenAI's default "start here" for most tasks | Verified scores de-emphasized by OpenAI (contamination concerns); pricier |
@@ -82,8 +86,8 @@ All values are JSON-serializable. The `scores` and `reason` fields enable audit 
 
 | Agent | trivial | standard | hard | Rationale |
 |---|---|---|---|---|
-| `claude` | `claude-haiku-4-5` | `claude-sonnet-5` | `claude-opus-4-8` | Anthropic's published 3-tier pattern: Haiku triages, Sonnet builds, Opus handles the hardest reasoning. |
-| `codex` | `gpt-5.4-mini` | `gpt-5.3-codex-spark` | `gpt-5.5` | OpenAI guidance: mini for light/subagent work; GPT-5.3-Codex is the strongest *agentic coding* model (≈85% Verified); GPT-5.5 is the "start here" for the most complex work. (Live-probed: the bare `gpt-5.3-codex` id 400s on ChatGPT-plan Codex CLI accounts — use `-spark`.) |
+| `claude` | `claude-haiku-4-5` | `claude-sonnet-5` | `claude-fable-5` | Local direct-CLI calibration: Haiku passed lease/ledger but failed the migration build; Sonnet stays balanced; Fable passed all three and replaces Opus at the ceiling. |
+| `codex` | `gpt-5.6-luna` | `gpt-5.3-codex-spark` | `gpt-5.5` | Local direct-CLI calibration: Luna clearly beat GPT-5.4 mini as the small tier; Spark kept the best mid-tier latency; GPT-5.5 had the cleanest hard-task review profile. |
 | `agy` | `gemini-3.5-flash` | `gemini-3.1-pro` | `gemini-3.1-pro` | Flash gives near-Pro quality at ~4x speed for cheap/fast work; Pro carries standard and hard. Google ships no separate "Opus-class" coding tier, so Pro is reused at hard. |
 
 ## Orchestration policy
@@ -96,8 +100,18 @@ Cheap/fast at the bottom, mid in the middle, most capable at the top — the
   cheapest tier of each agent.
 - **standard** — feature implementation, bug fixes, ordinary refactors, code review.
   The balanced mid tier is the right cost/quality point.
-- **hard** — multi-file refactors, architecture decisions, non-obvious debugging,
-  long autonomous runs. Spend the most capable model; the quality gap is double-digit.
+- **hard** — treat the tier as a risk flag, not an unconditional large-model
+  command. A well-specified concurrency task with a strong race/invariant harness
+  may start on a calibrated small model; migration, durability, security, missing
+  test oracles, and irreversible changes start on the hard model. Escalate on
+  objective verification or review-gate failure.
+
+The local calibration artifacts are in `bench/calibration/`. Exact Python, Rust,
+JavaScript, Java, SQL, and C++ cells now have selected three-repeat results, while
+Go remains single-repeat and HLE subject results remain 20-item single-repeat.
+These justify cell-specific cascades, not claims that one model is universally
+best. Always use the verify gate for stateful, concurrent, migration, security,
+or irreversible work.
 
 ### default_agent_by_difficulty rationale
 

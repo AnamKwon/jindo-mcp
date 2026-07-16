@@ -324,6 +324,23 @@ var isolateSchemaProp = map[string]any{
 	"description": "Default TRUE for write dispatches: the run executes in an ephemeral git worktree and commits changes to a jindo/iso-<token> branch for the HOST to merge, so an aborted/mis-routed write never leaves partial changes in the caller's tree. Pass false to write in place (legacy). Isolation is skipped automatically (runs in place, result.isolation.skipped=true) when workdir is not a git repository.",
 }
 
+// capabilitySchemaProp describes the task dimensions that difficulty keywords
+// cannot carry. It is shared by single- and multi-model dispatch tools so the
+// host classifies a task once and gets the same evidence-bounded route.
+var capabilitySchemaProp = map[string]any{
+	"type":        "object",
+	"description": "Optional capability cell for evidence-aware routing. Use domain+language+prompt_language+task_type+risk+oracle. The route returns benchmark priors and uncertainty; the host still chooses and explicitly pins the model or models.",
+	"properties": map[string]any{
+		"domain":          map[string]any{"type": "string", "description": "coding, mathematics, physics, chemistry, biology, computer_science_theory, medicine, law, history_humanities, social_science, or general_knowledge"},
+		"language":        map[string]any{"type": "string", "description": "Programming language for domain=coding, such as go, python, rust, or typescript_javascript."},
+		"prompt_language": map[string]any{"type": "string", "enum": []string{"english", "korean", "japanese", "multilingual_mixed"}, "description": "Natural language of the task instructions. Omit when unknown."},
+		"task_type":       map[string]any{"type": "string", "description": "Specific work shape or reasoning form, such as concurrency_fencing, migration_durability, debugging, formal_proof, or short_answer."},
+		"risk":            map[string]any{"type": "string", "enum": []string{"low", "normal", "high"}},
+		"oracle":          map[string]any{"type": "string", "enum": []string{"deterministic", "exact_answer", "judge", "none"}},
+	},
+	"required": []string{"domain", "task_type", "risk", "oracle"},
+}
+
 // validEfforts is the closed set of reasoning-effort levels the dispatch tools
 // accept, matching claude's supported range (codex is adapted at the edge; see
 // orchestrator.effortForCodex). An empty effort is always valid (means "use the
@@ -368,8 +385,19 @@ var planStepSchema = map[string]any{
 func tools() []toolDef {
 	return []toolDef{
 		{
+			Name:        "route_capability",
+			Description: "Return decision support for an explicit capability cell without running a model: benchmark-bounded candidates, per-model observations/cautions, uncertainty, oracle checks, reviewer policy, and the host selection contract. Candidate order is a prior, not an execution rule. The host must inspect the actual task, choose model(s), and record selection_reason when dispatching.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"capability": capabilitySchemaProp,
+				},
+				"required": []string{"capability"},
+			},
+		},
+		{
 			Name:        "dispatch",
-			Description: "Route a coding task to the right agent/model and run it. The caller may pin the executing agent and/or the exact model, may inject task-specific guidance into the author's system prompt, may override the per-tier reasoning effort, and may supply objective verify commands that gate the result; omit any of these to use the defaults.",
+			Description: "Run one explicitly selected model. With capability present, first call route_capability, inspect the task plus candidate evidence, then provide model and selection_reason; jindo never auto-pins the first benchmark candidate. Objective verify/review gates remain mandatory for calibrated coding work.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -380,22 +408,24 @@ func tools() []toolDef {
 						"type":        "string",
 						"description": "Optional routing priority hint: one of \"cost\", \"quality\", \"latency\". Reweights intra-tier agent selection; omit for the default weighting.",
 					},
-					"guidance": map[string]any{"type": "string", "description": "Optional task-specific guidance injected into the author agent's system prompt for THIS dispatch (e.g. language conventions, a checklist, or skill content). Omit for the default generic contract."},
-					"effort":   effortSchemaProp,
+					"guidance":         map[string]any{"type": "string", "description": "Optional task-specific guidance injected into the author agent's system prompt for THIS dispatch (e.g. language conventions, a checklist, or skill content). Omit for the default generic contract."},
+					"selection_reason": map[string]any{"type": "string", "description": "Required with capability: the host's concise task-specific reason for choosing this model, including relevant evidence, uncertainty, and verification plan."},
+					"effort":           effortSchemaProp,
 					"review": map[string]any{
 						"type":        "boolean",
 						"description": "Optional opt-in cross-model peer review of the dispatched result. Defaults to false (no review); set true to have a different model review the result and, on a critical finding, trigger one revision round. Review is ADVISORY — it NEVER fails the dispatch. Do NOT treat review=true (or a returned result) as a passed quality gate: consult result.review_status {requested, completed, gate_passed, confidence} to know whether the review actually completed and gated. Only review_status.gate_passed==true means cross-model review ran to completion with no unresolved critical finding (confidence \"reviewed\"); \"unverified\" means it did not complete and \"review_failed\" means a critical finding survived. The OBJECTIVE verify gate remains the primary signal. When review runs, the returned result.reviews carries, per reviewer and in the aggregate, an \"items\" array of the actual findings ({severity, title, message}, bounded and highest-severity-first) — not just per-severity counts — so the host can act on the specific issues a reviewer flagged.",
 					},
-					"verify":  verifySchemaProp,
-					"workdir": workdirSchemaProp,
-					"isolate": isolateSchemaProp,
+					"verify":     verifySchemaProp,
+					"workdir":    workdirSchemaProp,
+					"isolate":    isolateSchemaProp,
+					"capability": capabilitySchemaProp,
 				},
 				"required": []string{"task"},
 			},
 		},
 		{
 			Name: "dispatch_async",
-			Description: "Dispatch a coding task in the background and return immediately with a job_id (does not wait for the result). Use this for long/hard tasks that could exceed the MCP tool timeout. The caller may pin the executing agent and/or the exact model, may inject task-specific guidance into the author's system prompt, may override the per-tier reasoning effort, and may supply objective verify commands that gate the result; omit any of these to use the defaults. " +
+			Description: "Dispatch a coding task in the background and return immediately with a job_id (does not wait for the result). Use this for long/hard tasks that could exceed the MCP tool timeout. With capability present, the host must provide an exact model and selection_reason; jindo does not auto-select from benchmark candidates. The caller may also inject task-specific guidance, override effort, and supply objective verify commands. " +
 				"POLLING CONTRACT: after calling this you MUST poll job_status with the returned job_id until its status is 'done' (or 'error') before proceeding; do NOT treat a 'running' status as a result.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -407,15 +437,17 @@ func tools() []toolDef {
 						"type":        "string",
 						"description": "Optional routing priority hint: one of \"cost\", \"quality\", \"latency\". Reweights intra-tier agent selection; omit for the default weighting.",
 					},
-					"guidance": map[string]any{"type": "string", "description": "Optional task-specific guidance injected into the author agent's system prompt for THIS dispatch (e.g. language conventions, a checklist, or skill content). Omit for the default generic contract."},
-					"effort":   effortSchemaProp,
+					"guidance":         map[string]any{"type": "string", "description": "Optional task-specific guidance injected into the author agent's system prompt for THIS dispatch (e.g. language conventions, a checklist, or skill content). Omit for the default generic contract."},
+					"selection_reason": map[string]any{"type": "string", "description": "Required with capability: the host's concise task-specific reason for choosing this model, including relevant evidence, uncertainty, and verification plan."},
+					"effort":           effortSchemaProp,
 					"review": map[string]any{
 						"type":        "boolean",
 						"description": "Optional opt-in cross-model peer review of the dispatched result. Defaults to false (no review); set true to have a different model review the result and, on a critical finding, trigger one revision round. Review is ADVISORY — it NEVER fails the dispatch. Do NOT treat review=true (or a returned result) as a passed quality gate: consult result.review_status {requested, completed, gate_passed, confidence} to know whether the review actually completed and gated. Only review_status.gate_passed==true means cross-model review ran to completion with no unresolved critical finding (confidence \"reviewed\"); \"unverified\" means it did not complete and \"review_failed\" means a critical finding survived. The OBJECTIVE verify gate remains the primary signal. When review runs, the returned result.reviews carries, per reviewer and in the aggregate, an \"items\" array of the actual findings ({severity, title, message}, bounded and highest-severity-first) — not just per-severity counts — so the host can act on the specific issues a reviewer flagged.",
 					},
-					"verify":  verifySchemaProp,
-					"workdir": workdirSchemaProp,
-					"isolate": isolateSchemaProp,
+					"verify":     verifySchemaProp,
+					"workdir":    workdirSchemaProp,
+					"isolate":    isolateSchemaProp,
+					"capability": capabilitySchemaProp,
 				},
 				"required": []string{"task"},
 			},
@@ -426,16 +458,18 @@ func tools() []toolDef {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"task":     map[string]any{"type": "string", "description": "The task or question to fan out to every model."},
-					"models":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "The exact model ids to run concurrently (e.g. [\"claude-opus-4-8\", \"gpt-5.5\"]). Each runs read-only and the agent is inferred from the model id."},
-					"guidance": map[string]any{"type": "string", "description": "Optional task-specific guidance injected into every candidate's system prompt for THIS task. Omit for the default generic contract."},
+					"task":             map[string]any{"type": "string", "description": "The task or question to fan out to every model."},
+					"models":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Exact model ids selected by the host to run concurrently. Always required; capability evidence never silently chooses the fan-out."},
+					"guidance":         map[string]any{"type": "string", "description": "Optional task-specific guidance injected into every candidate's system prompt for THIS task. Omit for the default generic contract."},
+					"selection_reason": map[string]any{"type": "string", "description": "Required with capability: why this model set matches the task and uncertainty better than one automatic default."},
 					"synthesis": map[string]any{
 						"type":        "string",
 						"description": "Optional synthesis mode: \"none\" (default) returns only the raw candidates; \"judge\" additionally runs a judge model that merges them into one synthesized answer.",
 					},
 					"judge_model": map[string]any{"type": "string", "description": "Optional exact model id for the judge when synthesis=\"judge\". Omit to default to a strong judge model."},
+					"capability":  capabilitySchemaProp,
 				},
-				"required": []string{"task", "models"},
+				"required": []string{"task"},
 			},
 		},
 		{
@@ -445,16 +479,18 @@ func tools() []toolDef {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"task":     map[string]any{"type": "string", "description": "The task or question to fan out to every model."},
-					"models":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "The exact model ids to run concurrently (e.g. [\"claude-opus-4-8\", \"gpt-5.5\"]). Each runs read-only and the agent is inferred from the model id."},
-					"guidance": map[string]any{"type": "string", "description": "Optional task-specific guidance injected into every candidate's system prompt for THIS task. Omit for the default generic contract."},
+					"task":             map[string]any{"type": "string", "description": "The task or question to fan out to every model."},
+					"models":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Exact model ids selected by the host to run concurrently. Always required; capability evidence never silently chooses the fan-out."},
+					"guidance":         map[string]any{"type": "string", "description": "Optional task-specific guidance injected into every candidate's system prompt for THIS task. Omit for the default generic contract."},
+					"selection_reason": map[string]any{"type": "string", "description": "Required with capability: why this model set matches the task and uncertainty better than one automatic default."},
 					"synthesis": map[string]any{
 						"type":        "string",
 						"description": "Optional synthesis mode: \"none\" (default) returns only the raw candidates; \"judge\" additionally runs a judge model that merges them into one synthesized answer.",
 					},
 					"judge_model": map[string]any{"type": "string", "description": "Optional exact model id for the judge when synthesis=\"judge\". Omit to default to a strong judge model."},
+					"capability":  capabilitySchemaProp,
 				},
-				"required": []string{"task", "models"},
+				"required": []string{"task"},
 			},
 		},
 		{
@@ -669,6 +705,8 @@ func (s *Server) toolsCall(req *Request) Response {
 		return s.callAgents(req)
 	case "models_refresh":
 		return s.callModelsRefresh(req)
+	case "route_capability":
+		return s.callRouteCapability(req, p.Arguments)
 	case "compact":
 		return s.callCompact(req, p.Arguments)
 	case "calibrate":
@@ -682,20 +720,68 @@ func (s *Server) toolsCall(req *Request) Response {
 // effort?, review?, verify?, workdir?, isolate?} argument shape shared by the
 // sync "dispatch" and async "dispatch_async" tools.
 type dispatchArgs struct {
-	Task     string   `json:"task"`
-	Agent    string   `json:"agent"`
-	Model    string   `json:"model"`
-	Priority string   `json:"priority"`
-	Guidance string   `json:"guidance"`
-	Effort   string   `json:"effort"`
-	Review   bool     `json:"review"`
-	Verify   []string `json:"verify"`
-	Workdir  string   `json:"workdir"`
+	Task            string   `json:"task"`
+	Agent           string   `json:"agent"`
+	Model           string   `json:"model"`
+	Priority        string   `json:"priority"`
+	Guidance        string   `json:"guidance"`
+	SelectionReason string   `json:"selection_reason"`
+	Effort          string   `json:"effort"`
+	Review          bool     `json:"review"`
+	Verify          []string `json:"verify"`
+	Workdir         string   `json:"workdir"`
 	// Isolate is a THREE-state opt-out of the default-on ephemeral-worktree mode
 	// for write dispatches: nil (omitted) uses the DEFAULT (isolate ON), false
 	// forces in-place (legacy), true forces isolate. Decoded to a concrete
 	// isolate bool in runDispatch as (in.Isolate == nil || *in.Isolate).
-	Isolate *bool `json:"isolate"`
+	Isolate         *bool                       `json:"isolate"`
+	Capability      *routing.CapabilityContext  `json:"capability"`
+	CapabilityRoute *routing.CapabilityDecision `json:"-"`
+}
+
+// prepareDispatchCapability attaches benchmark decision support without
+// converting its first candidate into an execution rule. The host owns the
+// choice and must explicitly pin a model plus record a task-specific reason.
+// Calibrated coding routes also require the
+// existing objective verify and cross-model review gates; returning oracle
+// names without enforcing execution gates would let a host silently treat the
+// routing recommendation itself as evidence.
+func prepareDispatchCapability(in *dispatchArgs) error {
+	if in.Capability == nil {
+		return nil
+	}
+	decision, err := routing.RouteCapability(*in.Capability)
+	if err != nil {
+		return err
+	}
+	in.CapabilityRoute = &decision
+	if in.Capability.Domain == "coding" && decision.CalibrationRequired {
+		if len(in.Verify) == 0 {
+			return fmt.Errorf("calibrated coding capability route requires verify commands for its objective oracle")
+		}
+		if !in.Review {
+			return fmt.Errorf("calibrated coding capability route requires review=true for independent cross-model review")
+		}
+	}
+	if in.Model == "" {
+		return fmt.Errorf("capability route requires host model selection: call route_capability, inspect candidate_evidence, then provide model and selection_reason")
+	}
+	if in.SelectionReason == "" {
+		return fmt.Errorf("capability route requires selection_reason documenting task fit, benchmark evidence, uncertainty, and verification plan")
+	}
+	return nil
+}
+
+func capabilityCandidateContains(decision *routing.CapabilityDecision, model string) bool {
+	if decision == nil {
+		return false
+	}
+	for _, candidate := range decision.Candidates {
+		if candidate.Model == model {
+			return true
+		}
+	}
+	return false
 }
 
 // runDispatch executes in against the orchestrator (via DispatchAuto, which
@@ -761,6 +847,13 @@ func runDispatch(o *orchestrator.Orchestrator, in dispatchArgs) (map[string]any,
 	if res.Review != nil {
 		payload["review_status"] = res.Review
 	}
+	if in.CapabilityRoute != nil {
+		payload["capability_route"] = in.CapabilityRoute
+		payload["capability_selection"] = map[string]any{
+			"owner": "host", "models": []string{res.Model}, "reason": in.SelectionReason,
+			"within_benchmark_candidates": capabilityCandidateContains(in.CapabilityRoute, res.Model),
+		}
+	}
 	return payload, nil
 }
 
@@ -788,6 +881,9 @@ func (s *Server) callDispatch(req *Request, args json.RawMessage) Response {
 	if err := orchestrator.ValidateVerifyCmds(in.Verify); err != nil {
 		return errorResponse(req.ID, codeInvalidParams, "invalid params: "+err.Error())
 	}
+	if err := prepareDispatchCapability(&in); err != nil {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: "+err.Error())
+	}
 	payload, err := runDispatch(s.o, in)
 	if err != nil {
 		return errorResponse(req.ID, codeInternalError, "dispatch failed: "+err.Error())
@@ -799,11 +895,35 @@ func (s *Server) callDispatch(req *Request, args json.RawMessage) Response {
 // argument shape shared by the sync "dispatch_multi" and async
 // "dispatch_multi_async" tools.
 type multiArgs struct {
-	Task       string   `json:"task"`
-	Models     []string `json:"models"`
-	Guidance   string   `json:"guidance"`
-	Synthesis  string   `json:"synthesis"`
-	JudgeModel string   `json:"judge_model"`
+	Task            string                      `json:"task"`
+	Models          []string                    `json:"models"`
+	Guidance        string                      `json:"guidance"`
+	SelectionReason string                      `json:"selection_reason"`
+	Synthesis       string                      `json:"synthesis"`
+	JudgeModel      string                      `json:"judge_model"`
+	Capability      *routing.CapabilityContext  `json:"capability"`
+	CapabilityRoute *routing.CapabilityDecision `json:"-"`
+}
+
+func prepareMultiCapability(in *multiArgs) error {
+	if in.Capability == nil {
+		if len(in.Models) == 0 {
+			return fmt.Errorf("models is required and must be non-empty when capability is omitted")
+		}
+		return nil
+	}
+	decision, err := routing.RouteCapability(*in.Capability)
+	if err != nil {
+		return err
+	}
+	in.CapabilityRoute = &decision
+	if len(in.Models) == 0 {
+		return fmt.Errorf("capability route requires host model-set selection: call route_capability, then provide models and selection_reason")
+	}
+	if in.SelectionReason == "" {
+		return fmt.Errorf("capability route requires selection_reason documenting why this model set matches the task and uncertainty")
+	}
+	return nil
 }
 
 // runDispatchMulti fans the task out to every model in read-only propose mode
@@ -824,6 +944,17 @@ func runDispatchMulti(o *orchestrator.Orchestrator, in multiArgs) (map[string]an
 		}
 	}
 	payload := map[string]any{"candidates": candidates}
+	if in.CapabilityRoute != nil {
+		payload["capability_route"] = in.CapabilityRoute
+		within := true
+		for _, model := range in.Models {
+			within = within && capabilityCandidateContains(in.CapabilityRoute, model)
+		}
+		payload["capability_selection"] = map[string]any{
+			"owner": "host", "models": in.Models, "reason": in.SelectionReason,
+			"within_benchmark_candidates": within,
+		}
+	}
 	if res.Synthesis != nil {
 		payload["synthesis"] = map[string]any{
 			"agent":  res.Synthesis.Agent,
@@ -847,8 +978,8 @@ func (s *Server) callDispatchMulti(req *Request, args json.RawMessage) Response 
 	if in.Task == "" {
 		return errorResponse(req.ID, codeInvalidParams, "invalid params: task is required")
 	}
-	if len(in.Models) == 0 {
-		return errorResponse(req.ID, codeInvalidParams, "invalid params: models is required and must be non-empty")
+	if err := prepareMultiCapability(&in); err != nil {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: "+err.Error())
 	}
 	payload, err := runDispatchMulti(s.o, in)
 	if err != nil {
@@ -870,8 +1001,8 @@ func (s *Server) callDispatchMultiAsync(req *Request, args json.RawMessage) Resp
 	if in.Task == "" {
 		return errorResponse(req.ID, codeInvalidParams, "invalid params: task is required")
 	}
-	if len(in.Models) == 0 {
-		return errorResponse(req.ID, codeInvalidParams, "invalid params: models is required and must be non-empty")
+	if err := prepareMultiCapability(&in); err != nil {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: "+err.Error())
 	}
 	id := s.jobs.Submit(func() (map[string]any, error) {
 		return runDispatchMulti(s.o, in)
@@ -904,6 +1035,9 @@ func (s *Server) callDispatchAsync(req *Request, args json.RawMessage) Response 
 	// caller learns immediately rather than having to poll job_status only to find
 	// the background job errored on validation.
 	if err := orchestrator.ValidateVerifyCmds(in.Verify); err != nil {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: "+err.Error())
+	}
+	if err := prepareDispatchCapability(&in); err != nil {
 		return errorResponse(req.ID, codeInvalidParams, "invalid params: "+err.Error())
 	}
 	id := s.jobs.Submit(func() (map[string]any, error) {
@@ -1175,6 +1309,26 @@ func (s *Server) callAgents(req *Request) Response {
 // proposals for models not yet in the static table. It never modifies routing.
 func (s *Server) callModelsRefresh(req *Request) Response {
 	return textResult(req.ID, modelscan.Refresh())
+}
+
+// callRouteCapability exposes the exact policy used by dispatch and
+// dispatch_multi without executing a model, so a host can audit the route
+// before spending a model call.
+func (s *Server) callRouteCapability(req *Request, args json.RawMessage) Response {
+	var in struct {
+		Capability *routing.CapabilityContext `json:"capability"`
+	}
+	if err := decodeArgs(args, &in); err != nil {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: "+err.Error())
+	}
+	if in.Capability == nil {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: capability is required")
+	}
+	decision, err := routing.RouteCapability(*in.Capability)
+	if err != nil {
+		return errorResponse(req.ID, codeInvalidParams, "invalid params: "+err.Error())
+	}
+	return textResult(req.ID, decision)
 }
 
 // callCompact runs the compact tool: decode optional {max_entries, max_notes},
