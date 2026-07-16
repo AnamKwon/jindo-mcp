@@ -2,12 +2,14 @@
 
 The host routes on a capability cell, not on prompt difficulty alone:
 
-`domain × programming language × prompt language × task type × risk × oracle quality`
+`domain × programming language × prompt language × task type × risk × oracle quality × concrete task signals`
 
-The MCP-native decision-support surface is `route_capability`; it returns
-candidate evidence and uncertainty without choosing a model. `dispatch` and
-`dispatch_multi` consume the same optional `capability` object and enforce that
-the host explicitly records its model choice.
+The MCP-native decision-support surface is `route_capability`; it returns exact
+and analogous evidence, the full eligible catalog, concrete task signals, and
+uncertainty without choosing a model. `dispatch` and
+`dispatch_multi` require the same `capability` object in their MCP schemas and
+enforce that the host explicitly records its model choice. The server retains a
+capability-free path only for backward-compatible non-MCP callers.
 The versioned source is `internal/routing/config/capability_policy.json`. The
 offline `bench/capability_router.py` reads that same source.
 
@@ -86,20 +88,36 @@ Call `route_capability` with an explicit cell:
     "prompt_language": "english",
     "task_type": "concurrency_fencing",
     "risk": "high",
-    "oracle": "deterministic"
+    "oracle": "deterministic",
+    "signals": {
+      "ambiguity": "high",
+      "change_scope": "multi_file",
+      "context_size": "medium",
+      "reversibility": "limited",
+      "required_strengths": ["memory-model reasoning", "repository navigation"],
+      "failure_modes": ["stale owner mutation", "shallow race-test confidence"]
+    }
   }
 }
 ```
 
-Read `candidate_evidence`, `reason`, `required_oracle`, and `host_selection`
-against the concrete request. Decide whether one model is enough or independent
-comparison is safer. Then pass the same capability plus explicit `model` and
+Read `exact_match`, `evidence_gap`, `candidate_evidence`, `eligible_models`,
+`analogous_evidence`, `reason`, `required_oracle`, and `host_selection` against
+the concrete request. Exact candidates carry direct evidence for that cell. On
+an unmeasured cell, empty `candidates` means there is no direct benchmark prior;
+the full choice surface is `eligible_models` and `mode=host_decides`. Analogous
+cells explain possible transfer hypotheses but explicitly forbid copying their
+winner. Decide whether one model is enough, a
+small task-local probe is needed, or independent comparison is safer. Then pass
+the same capability plus explicit `model` and
 `selection_reason` to `dispatch`, or explicit `models` and `selection_reason`
 to `dispatch_multi`. There is no automatic first-candidate pin or automatic
 fan-out. Calibrated coding dispatches are also rejected without objective
 `verify` commands and `review:true`; host discretion changes selection, not the
-acceptance gates. A model outside the benchmark candidates is permitted when
-the host explains the task-specific reason, and the result records that override.
+acceptance gates. A model outside the exact benchmark candidates is permitted
+when the host explains the task-specific reason. The result records separately
+whether the choice was inside the direct benchmark prior and inside the eligible
+catalog.
 
 ## Offline examples
 
@@ -127,11 +145,26 @@ python3 bench/capability_router.py \
   --risk high --oracle exact_answer
 ```
 
-`cascade` is evidence that a bounded single-model attempt may be reasonable;
-`parallel_compare` is evidence that independent answers are safer. Neither is
-an execution command. The host can override either after considering task
+`cascade` is direct-cell evidence that a bounded single-model attempt may be
+reasonable; `parallel_compare` is direct-cell evidence that independent answers
+were safer in calibration. `host_decides` means no exact cell exists. None is an
+execution command. The host chooses after considering task
 ambiguity, risk, oracle strength, candidate tradeoffs, and operational budget,
 but must record why and still pass the objective/review gates.
+
+For `host_decides`, follow the returned `unmeasured_workflow`: interpret the
+real task, form plausible hypotheses from every eligible model (including small
+models), run the smallest representative probe only if it can change the
+choice, apply the real oracle and independent review, and record whether the
+result supported the routing hypothesis. This is host reasoning over evidence,
+not a hidden weighted score or a difficulty-to-size mapping.
+
+`eligible_models` is the evidence policy catalog filtered by available agent
+CLIs, not a claim that no newer model exists. Use `models_refresh` when the
+installed inventory may have changed. Newly discovered models are returned as
+`unmeasured_new_model` assessment requests with no proposed tier or effort; the
+host can include them in a reasoned task-local probe before adding benchmark
+evidence to the policy.
 
 ## Coverage that should be added
 

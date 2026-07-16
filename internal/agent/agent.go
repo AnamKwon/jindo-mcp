@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"time"
 )
+
+const maxStderrRunes = 4096
 
 // DefaultTimeout bounds a single agent-CLI subprocess run. Without a deadline a
 // hung coding-agent CLI would block its dispatch — and therefore the MCP request
@@ -163,6 +166,33 @@ func wrapExecErr(out []byte, err error) (string, error) {
 	return string(out), err
 }
 
+// wrapExecResult handles both ordinary subprocess failures and CLIs that exit
+// zero after printing only a diagnostic to stderr. The latter is not a usable
+// agent response: treating it as success turns the real failure into a later
+// empty/unparsed response. Non-empty stdout remains authoritative on a zero
+// exit so harmless progress or warning output on stderr does not fail a run.
+func wrapExecResult(out, stderr []byte, err error) (string, error) {
+	detail := boundedStderr(stderr)
+	if err != nil {
+		if detail != "" {
+			return string(out), fmt.Errorf("%w: %s", err, detail)
+		}
+		return wrapExecErr(out, err)
+	}
+	if len(bytes.TrimSpace(out)) == 0 && detail != "" {
+		return string(out), fmt.Errorf("agent produced no stdout: %s", detail)
+	}
+	return string(out), nil
+}
+
+func boundedStderr(stderr []byte) string {
+	detail := []rune(strings.TrimSpace(string(stderr)))
+	if len(detail) > maxStderrRunes {
+		detail = append(detail[:maxStderrRunes], []rune("...")...)
+	}
+	return string(detail)
+}
+
 // defaultExec runs the real subprocess via os/exec, binding the process working
 // directory to a.Dir when set (empty Dir inherits jindo's cwd, matching the
 // pre-workdir behavior).
@@ -180,8 +210,10 @@ func (a *cliAdapter) defaultExec(argv []string) (string, error) {
 	if a.Dir != "" {
 		cmd.Dir = a.Dir
 	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
-	return wrapExecErr(out, err)
+	return wrapExecResult(out, stderr.Bytes(), err)
 }
 
 // NewClaude returns an Adapter for the 'claude' CLI.

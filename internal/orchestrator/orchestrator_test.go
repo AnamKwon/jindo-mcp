@@ -2864,6 +2864,9 @@ func TestDispatchMultiCandidateErrorIsBestEffort(t *testing.T) {
 	if res.Candidates[1].Status != "error" {
 		t.Fatalf("candidate[1] status = %q, want error", res.Candidates[1].Status)
 	}
+	if !strings.Contains(res.Candidates[1].Result, "forced error") {
+		t.Fatalf("candidate[1] result = %q, want adapter failure reason", res.Candidates[1].Result)
+	}
 	// The failed candidate still carries the model (and resolved agent) it was asked for.
 	if res.Candidates[1].Model != "gpt-5.5" || res.Candidates[1].Agent != "codex" {
 		t.Fatalf("candidate[1] model/agent = %q/%q, want gpt-5.5/codex", res.Candidates[1].Model, res.Candidates[1].Agent)

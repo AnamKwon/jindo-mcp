@@ -19,8 +19,10 @@ class CapabilityRouterTests(unittest.TestCase):
         self.assertEqual(got["mode"], "cascade")
         self.assertTrue(got["calibration_required"])
         self.assertEqual(got["host_selection"]["owner"], "host")
-        self.assertEqual(got["host_selection"]["candidate_order"], "benchmark_prior_not_execution_order")
+        self.assertTrue(got["exact_match"])
+        self.assertEqual(got["host_selection"]["candidate_order"], "direct_evidence_prior_or_catalog_order_never_execution_order")
         self.assertEqual(len(got["candidate_evidence"]), len(got["candidates"]))
+        self.assertGreater(len(got["eligible_models"]), len(got["candidates"]))
         self.assertTrue(got["candidate_evidence"][0]["evidence"]["observed_strengths"])
         self.assertTrue(got["candidate_evidence"][0]["evidence"]["cautions"])
 
@@ -53,10 +55,25 @@ class CapabilityRouterTests(unittest.TestCase):
 
     def test_unmeasured_programming_language_is_not_claimed_as_measured(self):
         got = router.route(domain="coding", language="rust", task_type="concurrency_fencing",
-                           risk="high", oracle="deterministic")
+                           risk="high", oracle="deterministic",
+                           signals={"ambiguity": "high", "required_strengths": ["atomic ordering"]})
         self.assertTrue(got["calibration_required"])
-        self.assertEqual(got["evidence_status"], "unmeasured_language_or_task_type")
-        self.assertEqual(got["mode"], "parallel_compare")
+        self.assertFalse(got["exact_match"])
+        self.assertEqual(got["evidence_status"], "unmeasured_language_task_or_prompt_cell")
+        self.assertEqual(got["mode"], "host_decides")
+        self.assertEqual(got["candidates"], [])
+        self.assertGreaterEqual(len(got["eligible_models"]), 10)
+        self.assertEqual(got["signals"]["ambiguity"], "high")
+        self.assertTrue(any(cell["language"] == "rust" for cell in got["analogous_evidence"]))
+
+    def test_unmeasured_prompt_exposes_analogies_without_transferring_winner(self):
+        got = router.route(domain="coding", language="sql", task_type="bitemporal_ledger_report",
+                           prompt_language="japanese", risk="high", oracle="deterministic")
+        self.assertFalse(got["exact_match"])
+        self.assertEqual(got["mode"], "host_decides")
+        self.assertEqual(got["candidates"], [])
+        self.assertGreaterEqual(len(got["analogous_evidence"]), 2)
+        self.assertTrue(all(cell["transfer_warning"] for cell in got["analogous_evidence"]))
 
     def test_expansion_cells_preserve_stability_boundary(self):
         swift = router.route(domain="coding", language="swift", task_type="actor_isolation_atomic_batch",
@@ -95,11 +112,12 @@ class CapabilityRouterTests(unittest.TestCase):
         self.assertEqual({c["agent"] for c in got["candidates"]}, {"codex", "claude", "agy"})
         self.assertGreaterEqual(got["review"]["minimum_independent_reviewers"], 2)
 
-    def test_missing_oracle_forces_comparison_even_on_normal_coding(self):
+    def test_missing_oracle_leaves_mode_to_host_but_requires_stronger_review(self):
         got = router.route(domain="coding", language="python", task_type="debugging",
                            risk="normal", oracle="none")
-        self.assertEqual(got["mode"], "parallel_compare")
+        self.assertEqual(got["mode"], "host_decides")
         self.assertEqual(got["review"]["acceptance"], "two_reviews_agree_then_human_check")
+        self.assertGreaterEqual(got["review"]["minimum_independent_reviewers"], 2)
 
 
 if __name__ == "__main__":

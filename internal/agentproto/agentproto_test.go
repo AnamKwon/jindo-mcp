@@ -399,6 +399,28 @@ func TestBuildJudgePrompt(t *testing.T) {
 	}
 }
 
+func TestMemoryReadingPromptsForbidMCPRecursion(t *testing.T) {
+	dir := "/var/jindo/memory-xyz"
+	prompts := map[string]string{
+		"author":     BuildSystemPrompt(dir),
+		"reviewer":   BuildReviewPrompt(dir, "task", "result", ReviewArtifacts{}),
+		"planner":    BuildPlanPrompt("goal", dir),
+		"candidate":  BuildProposePrompt(dir, "task"),
+		"judge":      BuildJudgePrompt(dir, "task", []string{"candidate"}),
+		"goal-check": BuildGoalCheckPrompt(dir, "goal", "spec", "tests passed"),
+	}
+	for name, prompt := range prompts {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(prompt, "filesystem access") {
+				t.Fatalf("prompt does not require direct filesystem memory access:\n%s", prompt)
+			}
+			if !strings.Contains(prompt, "Do not call or invoke any MCP") {
+				t.Fatalf("prompt does not forbid recursive MCP memory access:\n%s", prompt)
+			}
+		})
+	}
+}
+
 func TestParsePlanResponse_ProseThenJSON(t *testing.T) {
 	stdout := `I read the shared memory and decomposed the goal.
 

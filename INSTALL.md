@@ -133,7 +133,7 @@ printf '%s\n%s\n' \
 ```
 
 You should get an `initialize` result (`serverInfo.name = "jindo-mcp"`) followed
-by a `tools/list` result listing the 13 tools.
+by a `tools/list` result containing the tool catalog.
 
 ## 5. Runtime notes
 

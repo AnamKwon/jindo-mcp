@@ -77,7 +77,7 @@ required.
 
 ## Tools
 
-The server registers 16 tools (defined in `internal/mcp`). The sections below
+The server tool catalog is defined in `internal/mcp`. The sections below
 document the core tools; for the **full, auto-checked catalog** of every
 registered tool — kept in sync with the code by the `TestToolsDocInSync` test —
 see [`docs/tools.md`](tools.md), which is the authoritative list.
@@ -342,9 +342,10 @@ concurrent agents see the compacted store on their next memory read.
 
 ### Exposed tools
 
-The MCP server registers **16 tools** — the full, test-verified catalog is in
+The MCP server's full, test-verified catalog is in
 [`docs/tools.md`](tools.md) (kept in sync with the code by `TestToolsDocInSync`):
-- `dispatch`: route + run a task, store result in shared memory (optionally with cross-model peer review)
+- `route_capability`: retrieve measured and analogous evidence without selecting a model
+- `dispatch`: run the host-selected model, verify/review it, and store the result in shared memory
 - `dispatch_async`: submit a task to run in the background, return a `job_id` immediately
 - `dispatch_multi`: fan a task out to multiple models in read-only propose mode, returning each candidate (optionally a judge synthesis)
 - `dispatch_multi_async`: background variant of `dispatch_multi`, returning a `job_id` immediately
@@ -357,7 +358,7 @@ The MCP server registers **16 tools** — the full, test-verified catalog is in
 - `plan_gate`: the autonomous loop's stop gate (integration verify + goal-met judge)
 - `memory`: read a specific key or the full store
 - `agents`: list agent/model routing table
-- `models_refresh`: probe installed CLIs for available models, propose routing for new ones (read-only)
+- `models_refresh`: probe installed CLIs for available models and report new ones as unmeasured, without name-based routing (read-only)
 - `compact`: run compaction with specified options (MaxEntries, TTLSeconds, etc.)
 - `calibrate`: aggregate dispatch.log into a routing calibration report (report-only unless `apply: true`)
 

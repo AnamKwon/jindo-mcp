@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "evidence_snapshot": "2026-07-15",
   "evidence_scope": {
     "status": "mixed_local_direct_cli_calibration",
@@ -11,12 +11,30 @@
   },
   "host_selection": {
     "owner": "host",
-    "candidate_order": "benchmark_prior_not_execution_order",
+    "candidate_order": "direct_evidence_prior_or_catalog_order_never_execution_order",
     "required_considerations": ["task_shape_fit", "invariant_and_risk_density", "oracle_strength", "scope_and_context_size", "repeatability", "review_findings", "latency_and_cost", "operational_failures"],
     "single_model_when": ["one candidate has directly relevant repeated evidence", "the objective oracle is strong enough to reject a bad result", "the change is bounded and reversible"],
     "multi_model_when": ["evidence is unstable or tied", "the task is ambiguous or high stakes", "the oracle is weak or absent", "candidate strengths address different failure modes"],
-    "selection_record": ["chosen_model_or_models", "task_fit", "benchmark_evidence_used", "known_uncertainty", "verification_and_review_plan"]
+    "selection_record": ["chosen_model_or_models", "task_fit", "benchmark_evidence_used", "known_uncertainty", "verification_and_review_plan"],
+    "evidence_boundaries": ["exact candidates are a benchmark prior, not an automatic selection", "eligible_models is the available policy catalog and its order is not a ranking", "analogous evidence may inform a hypothesis but never transfers a winner", "model size is evidence only when the measured task shape is relevant"],
+    "unmeasured_workflow": ["interpret the concrete task and populate its ambiguity, scope, context, reversibility, required strengths, and likely failure modes", "consult models_refresh when the installed inventory may have changed and treat every newly discovered model as unmeasured", "form one or more model hypotheses from eligible_models, analogous_evidence, and any reasoned new-model probe", "run the smallest representative task-local probe when uncertainty could change the choice", "apply the real objective oracle and independent review to the resulting work", "record why the observed result supports or rejects the routing hypothesis"]
   },
+  "model_catalog": [
+    {"agent": "codex", "model": "gpt-5.6-luna", "effort": "low"},
+    {"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"},
+    {"agent": "codex", "model": "gpt-5.6-sol", "effort": "high"},
+    {"agent": "codex", "model": "gpt-5.3-codex-spark", "effort": "high"},
+    {"agent": "codex", "model": "gpt-5.5", "effort": "high"},
+    {"agent": "claude", "model": "claude-haiku-4-5", "effort": "low"},
+    {"agent": "claude", "model": "claude-sonnet-5", "effort": "high"},
+    {"agent": "claude", "model": "claude-opus-4-8", "effort": "high"},
+    {"agent": "claude", "model": "claude-fable-5", "effort": "high"},
+    {"agent": "agy", "model": "Gemini 3.5 Flash (Low)", "effort": "low"},
+    {"agent": "agy", "model": "Gemini 3.5 Flash (Medium)", "effort": "medium"},
+    {"agent": "agy", "model": "Gemini 3.5 Flash (High)", "effort": "high"},
+    {"agent": "agy", "model": "Gemini 3.1 Pro (Low)", "effort": "medium"},
+    {"agent": "agy", "model": "Gemini 3.1 Pro (High)", "effort": "high"}
+  ],
   "model_evidence": {
     "gpt-5.6-luna": {"observed_strengths": ["small tier passed hard exact-numerical and selected contract cells", "useful low-cost Codex candidate for bounded work"], "cautions": ["Python contract test generation was 1/3", "do not transfer a one-off hard-cell pass across task types"], "operational_profile": "small_fast"},
     "gpt-5.6-terra": {"observed_strengths": ["repeated clean Go retry, JavaScript security, scheduler, and Swift evidence", "top calibrated reviewer cohort"], "cautions": ["some test-generation cells were slow or only screened once", "subject-level HLE results vary"], "operational_profile": "balanced_quality"},
@@ -332,32 +350,6 @@
       "required_oracle": ["exact_answer_scoring", "item_level_retention"]
     }
   ],
-  "fallbacks": {
-    "coding_mechanical": {
-      "candidates": [
-        {"agent": "agy", "model": "Gemini 3.5 Flash (Low)", "effort": "low"},
-        {"agent": "claude", "model": "claude-haiku-4-5", "effort": "low"},
-        {"agent": "codex", "model": "gpt-5.6-luna", "effort": "low"}
-      ],
-      "evidence": "tier_prior_not_language_calibrated"
-    },
-    "coding_unmeasured": {
-      "candidates": [
-        {"agent": "codex", "model": "gpt-5.3-codex-spark", "effort": "high"},
-        {"agent": "claude", "model": "claude-sonnet-5", "effort": "high"},
-        {"agent": "agy", "model": "Gemini 3.1 Pro (High)", "effort": "high"}
-      ],
-      "evidence": "provider_diverse_general_coding_prior_only"
-    },
-    "noncoding_unmeasured": {
-      "candidates": [
-        {"agent": "codex", "model": "gpt-5.6-sol", "effort": "high"},
-        {"agent": "agy", "model": "Gemini 3.1 Pro (High)", "effort": "high"},
-        {"agent": "claude", "model": "claude-fable-5", "effort": "high"}
-      ],
-      "evidence": "diverse_frontier_fallback_not_a_strength_ranking"
-    }
-  },
   "review_policy": {
     "status": "measured_20_cases_3_repeats",
     "pool": [

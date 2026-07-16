@@ -57,6 +57,13 @@ const lockPoll = 2 * time.Millisecond
 
 // New returns a SharedMemory rooted at root, creating the directory if needed.
 func New(root string) *SharedMemory {
+	// The root crosses a process boundary: orchestrators pass it to external
+	// coding-agent CLIs through --add-dir and prompt text. Canonicalizing it here
+	// keeps that bounded directory stable even when a CLI resolves relative paths
+	// against its own workspace or scratch directory instead of jindo's cwd.
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
 	// Mirror Python's mkdir(parents=True, exist_ok=True). Ignore the error to
 	// keep New non-fallible like __init__; a genuinely unusable root surfaces
 	// later when acquire()/load()/save() fail.

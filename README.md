@@ -3,17 +3,19 @@
 ![Cute Jindo dog mascot orchestrating multiple coding-agent windows](assets/jindo-hero.png)
 
 **JINDO** makes several coding-agent LLMs — Anthropic **Claude**, OpenAI
-**Codex**, Google **Gemini** (`agy`) — work as one. A host agent hands JINDO a
-task; JINDO routes it to the right model(s), runs them headless, can have other
-models review the result on request, and returns it — sharing context across
-agents through a file-locked store.
+**Codex**, Google **Gemini** (`agy`) — work as one. A host agent interprets the
+task, consults JINDO's measured capability evidence, and explicitly chooses the
+model or model set. JINDO then runs that choice headless, can have other models
+review it, applies objective verification, and returns the result while sharing
+bounded context through a file-locked store.
 
 The name maps to the design:
 
 - **Joint Intelligence** — multiple models collaborate on one task: a single author,
   cross-model peer review, or a multi-model fan-out synthesized into one answer.
 - **Network** — a pool of interchangeable agent CLIs (`claude`/`codex`/`agy`),
-  detected at startup and routed to by capability, difficulty, and reasoning effort.
+  detected at startup and selected by the host from capability evidence, task
+  uncertainty, operational constraints, and reasoning effort.
 - **Distributed Orchestration** — a lean, stateless-per-task orchestrator that moves
   work and records outcomes; each sub-agent runs isolated, in its own process, from
   only the host-provided task plus bounded shared memory.
@@ -31,19 +33,23 @@ unattended:
 1. **`plan(goal)`** — a read-only planner decomposes the goal into ordered steps, and
    JINDO persists them as active plan state.
 2. **`plan_next`** — the host asks for the next runnable step.
-3. **`dispatch`** — the host runs that step (optionally pinning `model`/`effort`, or
-   passing `review=true` / `verify` commands to gate it).
-4. **`plan_record`** — the host records the outcome, optionally calling **`plan_revise`**
+3. **`route_capability`** — the host describes that concrete step and reads exact
+   evidence, analogous evidence, cautions, and the available policy catalog.
+4. **`dispatch`** — the host explicitly pins `model`/`effort`, records
+   `selection_reason`, and supplies `review` / `verify` gates.
+5. **`plan_record`** — the host records the outcome, optionally calling **`plan_revise`**
    to adapt the remaining steps.
-5. Repeat from step 2 until no steps remain.
+6. Repeat from step 2 until no steps remain.
 
-Single, short tasks skip the loop and just call `dispatch` once.
+Single, short tasks skip the plan loop, but still call `route_capability` before
+the host-selected `dispatch`.
 
 ## Capabilities
 
-- **Difficulty routing + host override** — a deterministic scorer (with an optional
-  LLM-assess fallback) picks a tier → agent → model, or the host pins
-  `model`/`agent`/`effort` directly.
+- **Host-owned capability routing** — `route_capability` returns measured priors,
+  analogous cells, model observations/cautions, evidence gaps, and verification
+  guidance without selecting a model. MCP dispatch schemas require the host's
+  explicit model choice and `selection_reason`.
 - **Reasoning-effort routing** — per-tier effort (low/medium/high…) applied per CLI.
 - **Multi-model collaboration** — `dispatch(review=true)` fans out cross-model peer
   review (with a security checklist) plus one bounded revision; `dispatch_multi` fans a
@@ -56,22 +62,24 @@ Single, short tasks skip the loop and just call `dispatch` once.
 - **Availability-aware** — agent CLIs are detected at startup; routing only uses the
   ones installed, and the `agents` tool reports availability.
 - **Async** — `dispatch_async` + `job_status` for long tasks beyond the MCP tool timeout.
-- **Self-improvement** — `calibrate` aggregates the dispatch audit log and can apply
-  conservative routing tuning.
+- **Auditable calibration** — `calibrate` aggregates the legacy dispatch audit log;
+  capability policy changes remain explicit, benchmark-backed decisions rather
+  than automatic name- or keyword-based promotion.
 
-By default the routed tiers are **trivial → `agy`**, **standard → `claude`**,
-**hard → `codex`**; the host can override any choice. See
-[docs/routing_policy.md](docs/routing_policy.md) and [docs/model_policy.md](docs/model_policy.md).
+The internal Go orchestrator retains the old difficulty scorer for compatibility,
+but MCP hosts are advertised the host-owned capability contract. See
+[docs/capability-routing.md](docs/capability-routing.md) for the primary flow and
+[docs/routing_policy.md](docs/routing_policy.md) for the legacy fallback.
 
 ## Tools
 
-13 MCP tools, in three groups:
+MCP tools are grouped by responsibility:
 
 | group | tools |
 |-------|-------|
-| execution | `dispatch` · `dispatch_async` · `job_status` · `dispatch_multi` |
-| planning / step loop | `plan` · `plan_next` · `plan_record` · `plan_revise` · `plan_status` |
-| memory / ops | `memory` · `agents` · `compact` · `calibrate` |
+| routing / execution | `route_capability` · `dispatch` · `dispatch_async` · `dispatch_multi` · `dispatch_multi_async` · `job_status` · `agents` · `models_refresh` |
+| planning / step loop | `plan` · `plan_next` · `plan_record` · `plan_revise` · `plan_status` · `plan_gate` |
+| memory / ops | `memory` · `compact` · `calibrate` |
 
 Full reference and MCP registration: **[docs/jindo-mcp.md](docs/jindo-mcp.md)**.
 
@@ -119,4 +127,4 @@ printf '%s\n%s\n' \
 ```
 
 You should get an `initialize` result (`serverInfo.name = "jindo-mcp"`) followed by a
-`tools/list` result listing the 13 tools.
+`tools/list` result containing the tool catalog.

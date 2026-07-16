@@ -1484,7 +1484,7 @@ func (o *Orchestrator) proposeOne(task, model, guidance, memDir, cwd string) Can
 	// model-pin path: routing infers the agent from the model id (agent="").
 	route, err := o.Route(task, "", "", model)
 	if err != nil {
-		return Candidate{Model: model, Status: "error"}
+		return Candidate{Model: model, Result: err.Error(), Status: "error"}
 	}
 
 	sysPrompt := agentproto.BuildProposePrompt(memDir, task)
@@ -1499,12 +1499,12 @@ func (o *Orchestrator) proposeOne(task, model, guidance, memDir, cwd string) Can
 
 	ad, err := o.GetAdapter(route.Agent)
 	if err != nil {
-		return Candidate{Agent: route.Agent, Model: model, Status: "error"}
+		return Candidate{Agent: route.Agent, Model: model, Result: err.Error(), Status: "error"}
 	}
 
 	stdout, err := ad.RunWith(taskToSend, route.Model, extra)
 	if err != nil {
-		return Candidate{Agent: route.Agent, Model: model, Status: "error"}
+		return Candidate{Agent: route.Agent, Model: model, Result: err.Error(), Status: "error"}
 	}
 
 	resp := agentproto.ParseResponse(stdout)

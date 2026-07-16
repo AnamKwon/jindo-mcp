@@ -380,6 +380,7 @@ func TestToolsCallDispatchCapabilityUsesHostSelectedModel(t *testing.T) {
 			Owner                     string   `json:"owner"`
 			Models                    []string `json:"models"`
 			WithinBenchmarkCandidates bool     `json:"within_benchmark_candidates"`
+			WithinEligibleModels      bool     `json:"within_eligible_models"`
 		} `json:"capability_selection"`
 	}
 	if err := json.Unmarshal([]byte(contentText(t, resp)), &got); err != nil {
@@ -391,7 +392,7 @@ func TestToolsCallDispatchCapabilityUsesHostSelectedModel(t *testing.T) {
 	if got.CapabilityRoute.Mode != "cascade" || got.CapabilityRoute.EvidenceStatus != "measured_single_repeat" {
 		t.Fatalf("capability route = %+v", got.CapabilityRoute)
 	}
-	if got.CapabilitySelection.Owner != "host" || len(got.CapabilitySelection.Models) != 1 || got.CapabilitySelection.Models[0] != "gpt-5.6-terra" || got.CapabilitySelection.WithinBenchmarkCandidates {
+	if got.CapabilitySelection.Owner != "host" || len(got.CapabilitySelection.Models) != 1 || got.CapabilitySelection.Models[0] != "gpt-5.6-terra" || got.CapabilitySelection.WithinBenchmarkCandidates || !got.CapabilitySelection.WithinEligibleModels {
 		t.Fatalf("capability selection = %+v", got.CapabilitySelection)
 	}
 }
@@ -449,7 +450,7 @@ func TestToolsCallDispatchMultiCapabilityUsesHostSelectedModels(t *testing.T) {
 	if err := json.Unmarshal([]byte(contentText(t, resp)), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Candidates) != 2 || got.CapabilityRoute.Mode != "parallel_compare" {
+	if len(got.Candidates) != 2 || got.CapabilityRoute.Mode != "host_decides" {
 		t.Fatalf("result = %+v", got)
 	}
 }
@@ -485,8 +486,31 @@ func TestToolsCapabilitySchemaOnDispatchTools(t *testing.T) {
 		if !ok || capability["type"] != "object" {
 			t.Fatalf("%s capability schema = %v", name, capability)
 		}
+		capabilityProps, _ := capability["properties"].(map[string]any)
+		signals, ok := capabilityProps["signals"].(map[string]any)
+		if !ok || signals["type"] != "object" {
+			t.Fatalf("%s capability signals schema = %v", name, signals)
+		}
 		if _, ok := props["selection_reason"].(map[string]any); !ok {
 			t.Fatalf("%s selection_reason schema missing", name)
+		}
+		requiredRaw, ok := schema["required"].([]any)
+		if !ok {
+			t.Fatalf("%s required schema = %v", name, schema["required"])
+		}
+		required := map[string]bool{}
+		for _, item := range requiredRaw {
+			field, _ := item.(string)
+			required[field] = true
+		}
+		modelField := "model"
+		if strings.HasPrefix(name, "dispatch_multi") {
+			modelField = "models"
+		}
+		for _, field := range []string{"task", modelField, "selection_reason", "capability"} {
+			if !required[field] {
+				t.Fatalf("%s schema does not require host-routing field %q: %v", name, field, requiredRaw)
+			}
 		}
 		seen[name] = true
 	}
@@ -503,28 +527,33 @@ func TestToolsCallRouteCapabilityIsReadOnlyAndAuditable(t *testing.T) {
 	}
 	var got struct {
 		Mode                string `json:"mode"`
+		ExactMatch          bool   `json:"exact_match"`
 		EvidenceStatus      string `json:"evidence_status"`
+		EvidenceGap         string `json:"evidence_gap"`
 		CalibrationRequired bool   `json:"calibration_required"`
 		Candidates          []struct {
 			Agent string `json:"agent"`
 			Model string `json:"model"`
 		} `json:"candidates"`
 		CandidateEvidence []routing.CapabilityCandidateEvidence `json:"candidate_evidence"`
+		EligibleModels    []routing.CapabilityCandidateEvidence `json:"eligible_models"`
+		AnalogousEvidence []routing.CapabilityEvidenceCell      `json:"analogous_evidence"`
 		HostSelection     struct {
-			Owner          string `json:"owner"`
-			CandidateOrder string `json:"candidate_order"`
+			Owner              string   `json:"owner"`
+			CandidateOrder     string   `json:"candidate_order"`
+			UnmeasuredWorkflow []string `json:"unmeasured_workflow"`
 		} `json:"host_selection"`
 	}
 	if err := json.Unmarshal([]byte(contentText(t, resp)), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Mode != "parallel_compare" || got.EvidenceStatus != "unmeasured_language_or_task_type" || !got.CalibrationRequired {
+	if got.ExactMatch || got.Mode != "host_decides" || got.EvidenceStatus != "unmeasured_language_task_or_prompt_cell" || got.EvidenceGap == "" || !got.CalibrationRequired {
 		t.Fatalf("route = %+v", got)
 	}
-	if len(got.Candidates) != 3 {
-		t.Fatalf("candidates = %+v", got.Candidates)
+	if len(got.Candidates) != 0 || len(got.EligibleModels) < 10 {
+		t.Fatalf("direct candidates=%+v eligible=%d", got.Candidates, len(got.EligibleModels))
 	}
-	if len(got.CandidateEvidence) != 3 || got.HostSelection.Owner != "host" || got.HostSelection.CandidateOrder != "benchmark_prior_not_execution_order" {
+	if len(got.CandidateEvidence) != len(got.Candidates) || len(got.AnalogousEvidence) == 0 || got.HostSelection.Owner != "host" || got.HostSelection.CandidateOrder != "direct_evidence_prior_or_catalog_order_never_execution_order" || len(got.HostSelection.UnmeasuredWorkflow) == 0 {
 		t.Fatalf("decision support = evidence:%+v selection:%+v", got.CandidateEvidence, got.HostSelection)
 	}
 }
@@ -1104,8 +1133,10 @@ func TestToolsCallDispatchModelPin(t *testing.T) {
 	}
 }
 
-// TestToolsCallDispatchModelSchema verifies tools/list advertises the optional
-// "model" string argument on both the dispatch and dispatch_async input schemas.
+// TestToolsCallDispatchModelSchema verifies tools/list requires the host's
+// explicit model pin on both dispatch schemas. The server still accepts the
+// legacy capability-free shape for non-MCP compatibility, but hosts must not be
+// advertised that rule-based path as their default.
 func TestToolsCallDispatchModelSchema(t *testing.T) {
 	s, _ := newTestServer(t, "canned")
 	resp := call(t, s, `{"jsonrpc":"2.0","id":41,"method":"tools/list"}`)
@@ -1129,10 +1160,12 @@ func TestToolsCallDispatchModelSchema(t *testing.T) {
 			t.Fatalf("%s model property type = %v, want string", name, model["type"])
 		}
 		required, _ := schema["required"].([]any)
+		modelRequired := false
 		for _, r := range required {
-			if r == "model" {
-				t.Fatalf("%s: model must not be required: %v", name, required)
-			}
+			modelRequired = modelRequired || r == "model"
+		}
+		if !modelRequired {
+			t.Fatalf("%s: model must be required for host-owned routing: %v", name, required)
 		}
 		seen[name] = true
 	}

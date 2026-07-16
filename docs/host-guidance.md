@@ -10,7 +10,8 @@ ignore this section and work normally.)
   evidence packet, then call
   `dispatch(task, model, selection_reason, effort, verify, review)`. Pin the
   host-chosen model and provide repository-specific verification. The built-in
-  keyword scorer is only a no-capability fallback.
+  keyword scorer remains only for backward-compatible non-MCP callers; the MCP
+  schema requires capability, explicit model selection, and selection reason.
 - **Target directory:** if the task must create or modify files in a specific
   directory (e.g. a scratch project under `/tmp/...`), pass `workdir` on the
   dispatch. The sub-agent is anchored there (its process cwd + write access) and
@@ -37,32 +38,49 @@ ignore this section and work normally.)
   implement/refactor" the files must actually change — running only a review and
   leaving code unchanged is not done. Use jindo's built-in cross-model review via
   `dispatch(review=true)`; don't run a separate review MCP.
-- **Do not benchmark every request.** Calibration narrows the candidate set;
-  the current repository's tests decide whether this request may stop on the
-  selected model. A passing cheap model is a valid answer even for a difficult
-  prompt. A failing or unreviewed model is not.
-- **Classify capability before difficulty.** Record six axes before choosing:
+- **Do not rerun a full benchmark for every request.** For an exact measured
+  cell, use the direct evidence as a hypothesis and let the current repository's
+  tests decide whether this request may stop. For an unmeasured cell, run the
+  smallest task-local probe only when its result could change the host's model
+  choice. A passing cheap model is a valid answer even for a difficult prompt;
+  a failing or unreviewed model is not.
+- **Classify capability before difficulty.** Record six base axes before choosing:
   `domain` (coding, mathematics, biology, ...), coding `language` when
   applicable, natural `prompt_language`, `task_type`, consequence `risk`, and
-  `oracle` quality. Difficulty
+  `oracle` quality. Also record the concrete `signals`: ambiguity, change scope,
+  context size, reversibility, required strengths, and likely failure modes.
+  These signals are host observations, not inputs to a score. Difficulty
   alone is not a capability profile: a model may be strong at Go concurrency and
   weak at Rust concurrency, or strong at mathematics and weak at biology. Call
   MCP `route_capability` for the evidence-bounded recommendation, then pass the
   same `capability` object to execution. The runtime-embedded source is
   `internal/routing/config/capability_policy.json`.
-- **The host owns selection.** `route_capability` returns `candidate_evidence`
-  and `host_selection`; it does not select a model. Candidate order is a
-  benchmark prior, not an execution rule. For `dispatch`/`dispatch_async`, the
+- **The host owns selection.** `route_capability` returns `exact_match`,
+  `candidate_evidence`, the full `eligible_models` catalog,
+  `analogous_evidence`, and `host_selection`; it does not select a model.
+  Exact candidate order is a benchmark prior; eligible-model order is only an
+  inventory order. An empty exact candidate list means there is no direct-cell
+  prior, not that no model may run. Neither list is an execution rule. For
+  `dispatch`/`dispatch_async`, the
   host must provide an exact `model` and a concise `selection_reason`. For
   `dispatch_multi`/`dispatch_multi_async`, it must provide the exact `models`
   set and explain why comparison is warranted. Jindo records whether the chosen
-  models were inside the benchmark candidate set but permits a reasoned override.
+  models were inside the exact benchmark candidate set and the eligible catalog,
+  but permits a reasoned override.
+- **Refresh inventory without inventing capability.** Call `models_refresh` when
+  the installed CLI inventory may have changed. Models already present in the
+  capability catalog are not reported as new. Truly new models return
+  `evidence_status=unmeasured_new_model` plus an assessment checklist, never a
+  name-derived tier or effort. The host may include one in a task-local probe and
+  record it as an outside-catalog override; advertised size and words such as
+  “Flash”, “Opus”, or “Thinking” are not routing evidence.
 - **Evidence-guided host loop:** inspect the actual code path or question before
   choosing. Identify the invariant, ambiguity, change radius, context size,
   consequence of error, available oracle, and iteration budget. Then call
-  `route_capability` and compare each candidate's directly observed strengths,
+  `route_capability` and compare each model's directly observed strengths,
   cautions, repeatability, review defects, latency class, and operational
-  failures against this request. Choose one model only when evidence is directly
+  failures against this request. `analogous_evidence` is useful for forming a
+  hypothesis, but its winner never transfers automatically. Choose one model only when evidence is directly
   relevant, the work is bounded/reversible, and a strong oracle can reject a bad
   result. Choose multiple provider-diverse models when evidence is tied or
   unstable, the task is ambiguous/high-stakes, candidates cover different
@@ -90,11 +108,12 @@ ignore this section and work normally.)
   purposes. Test authorship is a separate capability from implementation and
   review: route by the language plus failure mode, then execute the generated
   tests against the correct implementation and a mutation set. Do not
-  transfer one cell's winner to unrelated work in the same language, to shell or
-  Swift, or to noncoding subjects. An exact unmeasured cell is a
-  calibration request, not evidence that the largest model wins. Until that cell
-  has repeated results, use the router's provider-diverse `parallel_compare`
-  candidates and retain every answer for scoring.
+  transfer one cell's winner to unrelated work in the same language or to
+  noncoding subjects. An unmeasured cell is a calibration request, not evidence
+  that the largest model wins. The router returns `mode=host_decides` and keeps
+  every available small, medium, and frontier model visible. The host chooses a
+  single probe or a provider-diverse comparison from the actual task's failure
+  modes and retains every probed answer for scoring.
 - **Prompt-language overrides are exact, not global.** The paired Java fixture
   kept Spark first in English and Korean, but the paired SQL cohort changed from
   English Haiku 3/3 to Korean Haiku 1/3 while Korean Spark passed 3/3. A later
@@ -110,7 +129,9 @@ ignore this section and work normally.)
   not a test result.
 - **HLE-like work:** classify the subject and reasoning form separately (for
   example `biology + short_answer`, `mathematics + formal_proof`, or `physics +
-  exact_calculation`). Run the provider-diverse frontier candidates independently.
+  exact_calculation`). Use `eligible_models` and subject-specific analogous
+  evidence to choose the comparison set; do not assume frontier size implies
+  subject strength.
   Exact dataset answers, symbolic/numeric checks, and item-level rubrics outrank a
   judge model. Store accuracy by subject, prompt language, reasoning form, and
   difficulty; only promote a subject-specific default after repeated items show a
@@ -149,19 +170,13 @@ ignore this section and work normally.)
   and focused package/test paths. Do not invent a green but irrelevant command
   such as `go version`. If no adequate oracle exists, use provider-diverse
   comparison and require cross-model review; do not claim objective verification.
-- **Provider inventory fallback** (availability map, not a routing rule):
-
-  | tier | claude | codex | agy (display name) | effort |
-  |---|---|---|---|---|
-  | simple / mechanical | `claude-haiku-4-5` | `gpt-5.6-luna` | `Gemini 3.5 Flash (Low)` | `low` |
-  | normal implementation | `claude-sonnet-5` | `gpt-5.3-codex-spark` | `Gemini 3.1 Pro (Low)` | `medium` |
-  | hard / security / high-leverage | `claude-fable-5` | `gpt-5.5` | `Gemini 3.1 Pro (High)` | `high` |
-
-  Use this table only when no capability evidence exists. The host must still
-  justify its choice from the actual task. Effort represents reasoning depth,
-  independently of model size: a bounded but subtle task may use a small model
-  at `high`. codex has no `max` effort (clamps to `xhigh`); agy encodes effort
-  in the model name so `effort` is ignored for it.
+- **No size ladder fallback.** When no exact capability evidence exists, do not
+  map difficulty labels to small/medium/frontier models. Read `eligible_models`,
+  relate their measured strengths and cautions to the actual signals, and probe
+  the cheapest plausible hypothesis when the oracle is strong. A bounded but
+  subtle task may justify a small model at high effort; a broad but familiar task
+  may justify a balanced model. codex has no `max` effort (clamps to `xhigh`);
+  agy encodes effort in the model name so `effort` is ignored for it.
 - **Sandbox:** jindo's `dispatch` spawns sub-agent processes. If your host
   sandboxes subprocess spawning (e.g. Codex's default `workspace-write`), run it
   with a full-access profile / elevated permissions or dispatch will be cancelled.

@@ -4,14 +4,17 @@ import "testing"
 
 func TestCapabilityPolicyHasEvidenceForEveryCandidateModel(t *testing.T) {
 	seen := map[string]bool{}
+	for _, candidate := range loadedCapabilityPolicy.ModelCatalog {
+		if seen[candidate.Model] {
+			t.Fatalf("duplicate model catalog entry %q", candidate.Model)
+		}
+		seen[candidate.Model] = true
+	}
 	for _, route := range loadedCapabilityPolicy.MeasuredRoutes {
 		for _, candidate := range route.Candidates {
-			seen[candidate.Model] = true
-		}
-	}
-	for _, fallback := range loadedCapabilityPolicy.Fallbacks {
-		for _, candidate := range fallback.Candidates {
-			seen[candidate.Model] = true
+			if !seen[candidate.Model] {
+				t.Fatalf("measured candidate %q is missing from model_catalog", candidate.Model)
+			}
 		}
 	}
 	for model := range seen {
@@ -36,8 +39,11 @@ func TestRouteCapabilityMeasuredGoConcurrencyUsesObservedSmallModel(t *testing.T
 	if got.Mode != "cascade" || len(got.Candidates) == 0 || got.Candidates[0].Model != "Gemini 3.5 Flash (Low)" {
 		t.Fatalf("route = %+v", got)
 	}
-	if got.HostSelection.Owner != "host" || got.HostSelection.CandidateOrder != "benchmark_prior_not_execution_order" || len(got.CandidateEvidence) != len(got.Candidates) {
+	if !got.ExactMatch || got.HostSelection.Owner != "host" || got.HostSelection.CandidateOrder != "direct_evidence_prior_or_catalog_order_never_execution_order" || len(got.CandidateEvidence) != len(got.Candidates) {
 		t.Fatalf("decision support = selection:%+v evidence:%+v", got.HostSelection, got.CandidateEvidence)
+	}
+	if len(got.EligibleModels) <= len(got.Candidates) || len(got.HostSelection.UnmeasuredWorkflow) == 0 {
+		t.Fatalf("host evidence catalog/workflow missing: eligible=%d selection=%+v", len(got.EligibleModels), got.HostSelection)
 	}
 	if len(got.CandidateEvidence[0].Evidence.ObservedStrengths) == 0 || len(got.CandidateEvidence[0].Evidence.Cautions) == 0 {
 		t.Fatalf("candidate evidence = %+v", got.CandidateEvidence[0])
@@ -191,16 +197,52 @@ func TestRouteCapabilityKoreanSQLOverridesGenericPromptRoute(t *testing.T) {
 	}
 }
 
-func TestRouteCapabilityUnmeasuredRustShapeStillRequiresParallelComparison(t *testing.T) {
+func TestRouteCapabilityUnmeasuredRustShapeLeavesChoiceToHost(t *testing.T) {
 	got, err := RouteCapability(CapabilityContext{
 		Domain: "coding", Language: "rust", TaskType: "concurrency_fencing",
 		Risk: "high", Oracle: "deterministic",
+		Signals: CapabilityTaskSignals{
+			Ambiguity: "high", ChangeScope: "multi_file",
+			RequiredStrengths: []string{"atomic ordering", "unsafe-code review"},
+			FailureModes:      []string{"lost update", "false confidence from shallow tests"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Mode != "parallel_compare" || got.EvidenceStatus != "unmeasured_language_or_task_type" {
+	if got.ExactMatch || got.Mode != "host_decides" || got.EvidenceStatus != "unmeasured_language_task_or_prompt_cell" || got.EvidenceGap == "" {
 		t.Fatalf("route = %+v", got)
+	}
+	if len(got.Candidates) != 0 || len(got.EligibleModels) < 10 {
+		t.Fatalf("unmeasured direct candidates=%d eligible=%d", len(got.Candidates), len(got.EligibleModels))
+	}
+	foundRust := false
+	for _, cell := range got.AnalogousEvidence {
+		if cell.Language == "rust" && cell.TaskType == "optimistic_atomic_store" {
+			foundRust = true
+			if cell.TransferWarning == "" {
+				t.Fatalf("analogous cell lacks transfer warning: %+v", cell)
+			}
+		}
+	}
+	if !foundRust || got.Context.Signals.Ambiguity != "high" {
+		t.Fatalf("analogous evidence/signals missing: cells=%+v signals=%+v", got.AnalogousEvidence, got.Context.Signals)
+	}
+}
+
+func TestRouteCapabilityUnmeasuredPromptDoesNotTransferEnglishWinner(t *testing.T) {
+	got, err := RouteCapability(CapabilityContext{
+		Domain: "coding", Language: "sql", PromptLanguage: "japanese",
+		TaskType: "bitemporal_ledger_report", Risk: "high", Oracle: "deterministic",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ExactMatch || got.Mode != "host_decides" || len(got.Candidates) != 0 || len(got.EligibleModels) < 10 {
+		t.Fatalf("route = %+v", got)
+	}
+	if len(got.AnalogousEvidence) < 2 {
+		t.Fatalf("want English and Korean SQL evidence, got %+v", got.AnalogousEvidence)
 	}
 }
 
@@ -249,5 +291,10 @@ func TestRouteCapabilityFiltersUnavailableAgents(t *testing.T) {
 	}
 	if len(got.Candidates) == 0 || got.Candidates[0].Agent != "codex" {
 		t.Fatalf("candidates = %+v", got.Candidates)
+	}
+	for _, item := range got.EligibleModels {
+		if item.Candidate.Agent == "agy" {
+			t.Fatalf("unavailable agent leaked into eligible catalog: %+v", got.EligibleModels)
+		}
 	}
 }

@@ -1,11 +1,11 @@
 // Package modelscan discovers, at runtime, which models each installed
-// coding-agent CLI actually exposes, and proposes how a newly-seen model
-// SHOULD be routed. It is an isolated, read-only observability layer: it never
+// coding-agent CLI actually exposes, and identifies newly seen models that need
+// assessment. It is an isolated, read-only observability layer: it never
 // touches the routing engine. The static routing table (internal/routing) is
-// the source of truth for how work is dispatched; modelscan only reports the
-// gap between that table and what the CLIs currently offer, plus HEURISTIC tier
-// proposals for a human (or the routing owner) to review. Nothing here is ever
-// auto-applied to routing.
+// the source of truth for legacy no-capability dispatch; modelscan only reports
+// the gap between that table and what the CLIs currently expose. A newly seen
+// model is explicitly unmeasured: its name is never converted into a tier,
+// effort, or capability claim. Nothing here is ever auto-applied to routing.
 //
 // Each CLI is probed with the strategy that CLI actually supports:
 //   - agy:    `agy models` enumerates every model (one per line) -> full list.
@@ -40,21 +40,20 @@ type AgentModels struct {
 	Source    string   `json:"source"`
 }
 
-// Proposal is a HEURISTIC, advisory routing suggestion for a discovered model
-// that is not yet in the static routing table. It is NEVER auto-applied: New is
-// true for models the routing owner has not yet placed, and ProposedTier /
-// ProposedEffort / Reason exist purely to speed a human review.
+// Proposal is an assessment request for a discovered model that is not yet in
+// the static routing table. It deliberately carries no proposed tier or effort:
+// model names and advertised size are not evidence of task capability.
 type Proposal struct {
-	Model          string `json:"model"`
-	Agent          string `json:"agent"`
-	ProposedTier   string `json:"proposed_tier"`
-	ProposedEffort string `json:"proposed_effort"`
-	Reason         string `json:"reason"`
-	New            bool   `json:"new"`
+	Model              string   `json:"model"`
+	Agent              string   `json:"agent"`
+	EvidenceStatus     string   `json:"evidence_status"`
+	RequiredAssessment []string `json:"required_assessment"`
+	Reason             string   `json:"reason"`
+	New                bool     `json:"new"`
 }
 
-// Inventory is the full Refresh result: what each agent exposes plus the
-// advisory proposals for models missing from the routing table.
+// Inventory is the full Refresh result: what each agent exposes plus assessment
+// requests for models missing from both routing and capability catalogs.
 type Inventory struct {
 	Agents    []AgentModels `json:"agents"`
 	Proposals []Proposal    `json:"proposals"`
@@ -151,47 +150,32 @@ func parseCodexActiveModel(out string) string {
 	return ""
 }
 
-// trivialKeywords and hardKeywords drive the name-based tier HEURISTIC in
-// Classify. They are matched case-insensitively as substrings, trivial FIRST,
-// then hard, so the first list to match wins; anything else falls to
-// "standard". These are deliberately advisory signals (model family / size /
-// reasoning-mode hints commonly encoded in display names), NOT a routing
-// decision — see Classify.
-var (
-	trivialKeywords = []string{"flash", "mini", "nano", "haiku", "lite", "oss", "small", "8b"}
-	hardKeywords    = []string{"opus", "gpt-5.5", "pro (high", "ultra", "thinking", "120b", "-max", " high)"}
-)
-
-// Classify produces advisory routing Proposals for every discovered model that
-// is NOT already listed for its agent in the reference table (agent -> tier ->
-// model). A model already in the table is skipped entirely (it is already
-// routed, so there is nothing to propose).
-//
-// The tier is a pure NAME HEURISTIC: the model name is lowercased and checked
-// against trivialKeywords first, then hardKeywords (first match wins), else
-// "standard". The matched keyword is recorded in Reason. ProposedEffort is the
-// routing engine's own effort for that tier (routing.EffortForDifficulty), so a
-// reviewer sees the effort the tier would dispatch with.
-//
-// IMPORTANT: this is a HEURISTIC PROPOSAL for human / routing-owner review. It
-// is never auto-applied to routing; New=true simply flags "not yet in the
-// table". Misclassification here changes nothing about how work is dispatched.
-func Classify(agents []AgentModels, reference map[string]map[string]string) []Proposal {
+// Classify reports every discovered model that is NOT already listed for its
+// agent in both the legacy reference table and capability catalog. Despite the
+// historical name, it does not classify model capability: each gap is marked
+// unmeasured and tells the host which evidence must be gathered before routing it.
+func Classify(agents []AgentModels, reference map[string]map[string]string, capabilityCatalog ...routing.CapabilityCandidate) []Proposal {
 	var proposals []Proposal
 	for _, am := range agents {
 		known := knownModels(reference[am.Agent])
+		for _, candidate := range capabilityCatalog {
+			if candidate.Agent == am.Agent {
+				known[candidate.Model] = true
+			}
+		}
 		for _, model := range am.Available {
 			if known[model] {
 				continue // already routed; nothing to propose
 			}
-			tier, keyword := heuristicTier(model)
 			proposals = append(proposals, Proposal{
-				Model:          model,
-				Agent:          am.Agent,
-				ProposedTier:   tier,
-				ProposedEffort: routing.EffortForDifficulty(tier),
-				Reason:         proposalReason(tier, keyword),
-				New:            true,
+				Model: model, Agent: am.Agent, EvidenceStatus: "unmeasured_new_model", New: true,
+				RequiredAssessment: []string{
+					"confirm the model can execute through its installed CLI",
+					"compare it on representative capability cells with objective oracles",
+					"measure repeatability, latency, operational failures, and independent review quality",
+					"let the host relate those observations to each concrete task",
+				},
+				Reason: "newly discovered model has no local task evidence; its name and size do not imply a routing tier",
 			})
 		}
 	}
@@ -208,40 +192,13 @@ func knownModels(tiers map[string]string) map[string]bool {
 	return set
 }
 
-// heuristicTier maps a model NAME to a proposed tier and returns the keyword
-// that decided it. Matching is case-insensitive substring, trivial keywords
-// first then hard keywords (first match wins), else "standard" with no keyword.
-func heuristicTier(model string) (tier, keyword string) {
-	lowered := strings.ToLower(model)
-	for _, kw := range trivialKeywords {
-		if strings.Contains(lowered, kw) {
-			return "trivial", kw
-		}
-	}
-	for _, kw := range hardKeywords {
-		if strings.Contains(lowered, kw) {
-			return "hard", kw
-		}
-	}
-	return "standard", ""
-}
-
-// proposalReason builds the human-facing why-string, naming the keyword that
-// drove a trivial/hard proposal or explaining the standard fallthrough.
-func proposalReason(tier, keyword string) string {
-	if keyword == "" {
-		return "heuristic proposal (advisory, for routing-owner review): no trivial/hard keyword matched -> standard"
-	}
-	return "heuristic proposal (advisory, for routing-owner review): name matched " + tier + " keyword \"" + keyword + "\""
-}
-
 // Refresh is the convenience entry point used by the MCP tool: probe every
-// agent, then classify the discovered models against the LIVE routing table.
+// agent, then report unmeasured models against the live legacy routing table.
 // It is read-only end to end.
 func Refresh() Inventory {
 	agents := Probe()
 	return Inventory{
 		Agents:    agents,
-		Proposals: Classify(agents, routing.AgentsModels()),
+		Proposals: Classify(agents, routing.AgentsModels(), routing.CapabilityModelCatalog()...),
 	}
 }

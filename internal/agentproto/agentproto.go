@@ -36,6 +36,8 @@ it can be parsed reliably. Code fences are optional, but the object must be
 valid JSON.
 `
 
+const directMemoryReadInstruction = "Read the shared-memory files directly through filesystem access. Do not call or invoke any MCP server or MCP tool to read shared memory; the orchestrator already provided the bounded directory.\n\n"
+
 // MemoryUpdate is one entry an agent may emit to record context for later
 // agents. Every field is optional: a keyed value (Key+Value) records a fact in
 // the shared store, while a free-form Note leaves a human-readable breadcrumb.
@@ -80,6 +82,7 @@ func BuildSystemPrompt(memoryDir string) string {
 	b.WriteString("Check for both the live recent entries and \"_digest\" explicitly; reading only\n")
 	b.WriteString("one of the two will silently lose context. Keep track of which memory keys you\n")
 	b.WriteString("actually relied on, so you can list them in memory_used in your final report.\n\n")
+	b.WriteString(directMemoryReadInstruction)
 
 	b.WriteString("STEP 2 - DO THE REQUESTED WORK.\n")
 	b.WriteString("Carry out the task described in the user prompt. If the task is ambiguous or\n")
@@ -177,6 +180,7 @@ func BuildReviewPrompt(memoryDir, authorTask, authorResult string, arts ReviewAr
 	b.WriteString("This directory holds prior agents' context (memory.json and the .jindo store,\n")
 	b.WriteString("plus a possible reserved \"_digest\" summary of older facts). Load that context\n")
 	b.WriteString("so your review is grounded in what the author actually had available.\n\n")
+	b.WriteString(directMemoryReadInstruction)
 
 	b.WriteString("STEP 2 - REVIEW THE AUTHOR'S WORK AGAINST THE TASK.\n")
 	b.WriteString("The author was asked to do this task:\n")
@@ -361,6 +365,7 @@ func BuildPlanPrompt(goal, memoryDir string) string {
 	b.WriteString("plus a possible reserved \"_digest\" summary of older facts). Load that context\n")
 	b.WriteString("so the plan builds on what is already known instead of repeating or\n")
 	b.WriteString("contradicting it.\n\n")
+	b.WriteString(directMemoryReadInstruction)
 
 	b.WriteString("STEP 2 - DECOMPOSE THE GOAL INTO STEPS.\n")
 	b.WriteString("The goal to plan is:\n")
@@ -453,6 +458,7 @@ func BuildProposePrompt(memoryDir, task string) string {
 	b.WriteString("plus a possible reserved \"_digest\" summary of older facts). Load that context\n")
 	b.WriteString("so your solution builds on what is already known instead of repeating or\n")
 	b.WriteString("contradicting it.\n\n")
+	b.WriteString(directMemoryReadInstruction)
 
 	b.WriteString("STEP 2 - SOLVE THE TASK (DO NOT WRITE FILES).\n")
 	b.WriteString("The task to solve is:\n")
@@ -498,6 +504,7 @@ func BuildJudgePrompt(memoryDir, task string, candidates []string) string {
 	b.WriteString("This directory holds prior agents' context (memory.json and the .jindo store,\n")
 	b.WriteString("plus a possible reserved \"_digest\" summary of older facts). Load that context\n")
 	b.WriteString("so your synthesis is grounded in what the candidates actually had available.\n\n")
+	b.WriteString(directMemoryReadInstruction)
 
 	b.WriteString("STEP 2 - SYNTHESIZE THE BEST SOLUTION FROM THE CANDIDATES.\n")
 	b.WriteString("The task the candidates solved is:\n")
@@ -552,6 +559,7 @@ func BuildGoalCheckPrompt(memoryDir, goal, spec, integrationSummary string) stri
 	b.WriteString("This directory holds prior agents' context (memory.json and the .jindo store,\n")
 	b.WriteString("plus a possible reserved \"_digest\" summary of older facts). Load that context\n")
 	b.WriteString("so your judgment is grounded in what was actually attempted.\n\n")
+	b.WriteString(directMemoryReadInstruction)
 
 	b.WriteString("STEP 2 - INSPECT THE REPOSITORY AND JUDGE THE GOAL.\n")
 	b.WriteString("The goal to judge is:\n")

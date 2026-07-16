@@ -329,7 +329,7 @@ var isolateSchemaProp = map[string]any{
 // host classifies a task once and gets the same evidence-bounded route.
 var capabilitySchemaProp = map[string]any{
 	"type":        "object",
-	"description": "Optional capability cell for evidence-aware routing. Use domain+language+prompt_language+task_type+risk+oracle. The route returns benchmark priors and uncertainty; the host still chooses and explicitly pins the model or models.",
+	"description": "Capability description for host-owned routing. MCP dispatch tools require it together with an explicit model choice and selection reason. The route returns exact and analogous benchmark evidence plus the eligible policy catalog; it never selects a model. Include concrete task signals when they are known.",
 	"properties": map[string]any{
 		"domain":          map[string]any{"type": "string", "description": "coding, mathematics, physics, chemistry, biology, computer_science_theory, medicine, law, history_humanities, social_science, or general_knowledge"},
 		"language":        map[string]any{"type": "string", "description": "Programming language for domain=coding, such as go, python, rust, or typescript_javascript."},
@@ -337,6 +337,18 @@ var capabilitySchemaProp = map[string]any{
 		"task_type":       map[string]any{"type": "string", "description": "Specific work shape or reasoning form, such as concurrency_fencing, migration_durability, debugging, formal_proof, or short_answer."},
 		"risk":            map[string]any{"type": "string", "enum": []string{"low", "normal", "high"}},
 		"oracle":          map[string]any{"type": "string", "enum": []string{"deterministic", "exact_answer", "judge", "none"}},
+		"signals": map[string]any{
+			"type":        "object",
+			"description": "Host observations about this concrete task. These are shown as decision evidence and are not converted into a hidden score or rule-based model choice.",
+			"properties": map[string]any{
+				"ambiguity":          map[string]any{"type": "string", "description": "How underspecified or interpretation-sensitive the work is."},
+				"change_scope":       map[string]any{"type": "string", "description": "Observed scope such as single function, multi-file, cross-system, or read-only answer."},
+				"context_size":       map[string]any{"type": "string", "description": "Amount and dispersion of context the model must preserve."},
+				"reversibility":      map[string]any{"type": "string", "description": "How easily an incorrect result can be detected and undone."},
+				"required_strengths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Capabilities the host infers from the actual task rather than its label alone."},
+				"failure_modes":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Likely ways a superficially plausible result could be wrong."},
+			},
+		},
 	},
 	"required": []string{"domain", "task_type", "risk", "oracle"},
 }
@@ -386,7 +398,7 @@ func tools() []toolDef {
 	return []toolDef{
 		{
 			Name:        "route_capability",
-			Description: "Return decision support for an explicit capability cell without running a model: benchmark-bounded candidates, per-model observations/cautions, uncertainty, oracle checks, reviewer policy, and the host selection contract. Candidate order is a prior, not an execution rule. The host must inspect the actual task, choose model(s), and record selection_reason when dispatching.",
+			Description: "Return evidence for host-owned model routing without running a model: exact-cell priors, the full eligible model catalog, analogous benchmark cells with transfer warnings, task signals, evidence gaps, oracle checks, and the unmeasured-task probe workflow. No score or candidate order selects a model; the host must inspect the concrete task, choose model(s), and record selection_reason.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -397,19 +409,19 @@ func tools() []toolDef {
 		},
 		{
 			Name:        "dispatch",
-			Description: "Run one explicitly selected model. With capability present, first call route_capability, inspect the task plus candidate evidence, then provide model and selection_reason; jindo never auto-pins the first benchmark candidate. Objective verify/review gates remain mandatory for calibrated coding work.",
+			Description: "Run one model explicitly selected by the host. First call route_capability, inspect the concrete task plus exact/analogous/model evidence, then provide capability, model, and selection_reason; jindo never auto-pins a candidate for MCP hosts. Objective verify/review gates remain mandatory for calibrated coding work.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"task":  map[string]any{"type": "string"},
 					"agent": map[string]any{"type": "string"},
-					"model": map[string]any{"type": "string", "description": "Optional exact model id to run (e.g. \"claude-opus-4-8\"). When set, the caller pins the model and jindo skips score-based routing; the agent is inferred from the model unless also given. Omit to let jindo route by task difficulty."},
+					"model": map[string]any{"type": "string", "description": "Exact model id chosen by the host (e.g. \"claude-opus-4-8\"). This pin bypasses legacy score-based routing; the agent is inferred from the model unless also given."},
 					"priority": map[string]any{
 						"type":        "string",
 						"description": "Optional routing priority hint: one of \"cost\", \"quality\", \"latency\". Reweights intra-tier agent selection; omit for the default weighting.",
 					},
 					"guidance":         map[string]any{"type": "string", "description": "Optional task-specific guidance injected into the author agent's system prompt for THIS dispatch (e.g. language conventions, a checklist, or skill content). Omit for the default generic contract."},
-					"selection_reason": map[string]any{"type": "string", "description": "Required with capability: the host's concise task-specific reason for choosing this model, including relevant evidence, uncertainty, and verification plan."},
+					"selection_reason": map[string]any{"type": "string", "description": "The host's required task-specific reason for choosing this model, including relevant evidence, uncertainty, and verification plan."},
 					"effort":           effortSchemaProp,
 					"review": map[string]any{
 						"type":        "boolean",
@@ -420,25 +432,25 @@ func tools() []toolDef {
 					"isolate":    isolateSchemaProp,
 					"capability": capabilitySchemaProp,
 				},
-				"required": []string{"task"},
+				"required": []string{"task", "model", "selection_reason", "capability"},
 			},
 		},
 		{
 			Name: "dispatch_async",
-			Description: "Dispatch a coding task in the background and return immediately with a job_id (does not wait for the result). Use this for long/hard tasks that could exceed the MCP tool timeout. With capability present, the host must provide an exact model and selection_reason; jindo does not auto-select from benchmark candidates. The caller may also inject task-specific guidance, override effort, and supply objective verify commands. " +
+			Description: "Dispatch a host-selected coding model in the background and return immediately with a job_id. First call route_capability, then provide capability, exact model, and selection_reason; jindo does not auto-select for MCP hosts. Use this for long/hard tasks that could exceed the MCP tool timeout. The caller may also inject task-specific guidance, override effort, and supply objective verify commands. " +
 				"POLLING CONTRACT: after calling this you MUST poll job_status with the returned job_id until its status is 'done' (or 'error') before proceeding; do NOT treat a 'running' status as a result.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"task":  map[string]any{"type": "string"},
 					"agent": map[string]any{"type": "string"},
-					"model": map[string]any{"type": "string", "description": "Optional exact model id to run (e.g. \"claude-opus-4-8\"). When set, the caller pins the model and jindo skips score-based routing; the agent is inferred from the model unless also given. Omit to let jindo route by task difficulty."},
+					"model": map[string]any{"type": "string", "description": "Exact model id chosen by the host. This pin bypasses legacy score-based routing; the agent is inferred from the model unless also given."},
 					"priority": map[string]any{
 						"type":        "string",
 						"description": "Optional routing priority hint: one of \"cost\", \"quality\", \"latency\". Reweights intra-tier agent selection; omit for the default weighting.",
 					},
 					"guidance":         map[string]any{"type": "string", "description": "Optional task-specific guidance injected into the author agent's system prompt for THIS dispatch (e.g. language conventions, a checklist, or skill content). Omit for the default generic contract."},
-					"selection_reason": map[string]any{"type": "string", "description": "Required with capability: the host's concise task-specific reason for choosing this model, including relevant evidence, uncertainty, and verification plan."},
+					"selection_reason": map[string]any{"type": "string", "description": "The host's required task-specific reason for choosing this model, including relevant evidence, uncertainty, and verification plan."},
 					"effort":           effortSchemaProp,
 					"review": map[string]any{
 						"type":        "boolean",
@@ -449,19 +461,19 @@ func tools() []toolDef {
 					"isolate":    isolateSchemaProp,
 					"capability": capabilitySchemaProp,
 				},
-				"required": []string{"task"},
+				"required": []string{"task", "model", "selection_reason", "capability"},
 			},
 		},
 		{
 			Name:        "dispatch_multi",
-			Description: "Fan a task out to multiple models concurrently in read-only \"propose\" mode: each model returns its OWN complete candidate solution (no files are written, so the candidates never clobber each other). Returns each model's candidate; with synthesis=\"judge\" it also returns a jindo-synthesized answer merging the candidates. This is the general collaboration primitive for coding AND non-coding tasks; the host decides when to use it versus single dispatch and normally synthesizes the candidates itself. For a slow/large fan-out (many models and/or synthesis=\"judge\"), prefer dispatch_multi_async instead, since this synchronous call can exceed the host's MCP idle timeout.",
+			Description: "Fan a host-selected model set out concurrently in read-only \"propose\" mode. First call route_capability, then provide capability, exact models, and selection_reason; no rule chooses the set. Each model returns its OWN complete candidate solution (no files are written, so candidates never clobber each other). With synthesis=\"judge\" jindo also merges them. For a slow/large fan-out, prefer dispatch_multi_async.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"task":             map[string]any{"type": "string", "description": "The task or question to fan out to every model."},
 					"models":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Exact model ids selected by the host to run concurrently. Always required; capability evidence never silently chooses the fan-out."},
 					"guidance":         map[string]any{"type": "string", "description": "Optional task-specific guidance injected into every candidate's system prompt for THIS task. Omit for the default generic contract."},
-					"selection_reason": map[string]any{"type": "string", "description": "Required with capability: why this model set matches the task and uncertainty better than one automatic default."},
+					"selection_reason": map[string]any{"type": "string", "description": "The host's required reason why this model set matches the task and uncertainty better than one automatic default."},
 					"synthesis": map[string]any{
 						"type":        "string",
 						"description": "Optional synthesis mode: \"none\" (default) returns only the raw candidates; \"judge\" additionally runs a judge model that merges them into one synthesized answer.",
@@ -469,12 +481,12 @@ func tools() []toolDef {
 					"judge_model": map[string]any{"type": "string", "description": "Optional exact model id for the judge when synthesis=\"judge\". Omit to default to a strong judge model."},
 					"capability":  capabilitySchemaProp,
 				},
-				"required": []string{"task"},
+				"required": []string{"task", "models", "selection_reason", "capability"},
 			},
 		},
 		{
 			Name: "dispatch_multi_async",
-			Description: "Async variant of dispatch_multi: fan a task out to multiple models concurrently in read-only \"propose\" mode and return immediately with a job_id instead of waiting for every candidate (and optional judge synthesis) to finish. A multi-model fan-out plus a judge can take minutes, and a synchronous dispatch_multi call can exceed the host's MCP idle timeout; use this variant for slow/large fan-outs instead. The done job result carries the same {candidates, synthesis?} payload dispatch_multi returns. " +
+			Description: "Async variant of dispatch_multi: after route_capability, fan the host-selected exact models out in read-only \"propose\" mode with capability and selection_reason, then return a job_id. No rule chooses the model set. Use this for slow/large fan-outs; the done job result carries the same {candidates, synthesis?} payload. " +
 				"POLLING CONTRACT: after calling this you MUST poll job_status with the returned job_id until its status is 'done' (or 'error') before proceeding; do NOT treat a 'running' status as a result.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -482,7 +494,7 @@ func tools() []toolDef {
 					"task":             map[string]any{"type": "string", "description": "The task or question to fan out to every model."},
 					"models":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Exact model ids selected by the host to run concurrently. Always required; capability evidence never silently chooses the fan-out."},
 					"guidance":         map[string]any{"type": "string", "description": "Optional task-specific guidance injected into every candidate's system prompt for THIS task. Omit for the default generic contract."},
-					"selection_reason": map[string]any{"type": "string", "description": "Required with capability: why this model set matches the task and uncertainty better than one automatic default."},
+					"selection_reason": map[string]any{"type": "string", "description": "The host's required reason why this model set matches the task and uncertainty better than one automatic default."},
 					"synthesis": map[string]any{
 						"type":        "string",
 						"description": "Optional synthesis mode: \"none\" (default) returns only the raw candidates; \"judge\" additionally runs a judge model that merges them into one synthesized answer.",
@@ -490,7 +502,7 @@ func tools() []toolDef {
 					"judge_model": map[string]any{"type": "string", "description": "Optional exact model id for the judge when synthesis=\"judge\". Omit to default to a strong judge model."},
 					"capability":  capabilitySchemaProp,
 				},
-				"required": []string{"task"},
+				"required": []string{"task", "models", "selection_reason", "capability"},
 			},
 		},
 		{
@@ -591,7 +603,7 @@ func tools() []toolDef {
 		},
 		{
 			Name:        "models_refresh",
-			Description: "Probe each installed agent CLI for its actually-available models (agy: full list via `agy models`; codex: active model via `codex doctor`; claude: none) and return the inventory plus HEURISTIC routing proposals for models not yet in the static table. READ-ONLY: it does not modify routing — a human/the routing owner reviews the proposals. Use to detect when a user's available model set has changed.",
+			Description: "Probe each installed agent CLI for its actually-available models (agy: full list via `agy models`; codex: active model via `codex doctor`; claude: none) and report new models as unmeasured assessment requests. It never infers a tier or effort from a model name and never modifies routing. Use to detect when the available model set has changed, then let the host gather task evidence.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},
@@ -784,6 +796,18 @@ func capabilityCandidateContains(decision *routing.CapabilityDecision, model str
 	return false
 }
 
+func capabilityEligibleContains(decision *routing.CapabilityDecision, model string) bool {
+	if decision == nil {
+		return false
+	}
+	for _, item := range decision.EligibleModels {
+		if item.Candidate.Model == model {
+			return true
+		}
+	}
+	return false
+}
+
 // runDispatch executes in against the orchestrator (via DispatchAuto, which
 // honors the optional model pin, the optional task-specific guidance, and the
 // Review flag) and builds the JSON-able payload map both the sync and async
@@ -852,6 +876,7 @@ func runDispatch(o *orchestrator.Orchestrator, in dispatchArgs) (map[string]any,
 		payload["capability_selection"] = map[string]any{
 			"owner": "host", "models": []string{res.Model}, "reason": in.SelectionReason,
 			"within_benchmark_candidates": capabilityCandidateContains(in.CapabilityRoute, res.Model),
+			"within_eligible_models":      capabilityEligibleContains(in.CapabilityRoute, res.Model),
 		}
 	}
 	return payload, nil
@@ -947,12 +972,15 @@ func runDispatchMulti(o *orchestrator.Orchestrator, in multiArgs) (map[string]an
 	if in.CapabilityRoute != nil {
 		payload["capability_route"] = in.CapabilityRoute
 		within := true
+		eligible := true
 		for _, model := range in.Models {
 			within = within && capabilityCandidateContains(in.CapabilityRoute, model)
+			eligible = eligible && capabilityEligibleContains(in.CapabilityRoute, model)
 		}
 		payload["capability_selection"] = map[string]any{
 			"owner": "host", "models": in.Models, "reason": in.SelectionReason,
 			"within_benchmark_candidates": within,
+			"within_eligible_models":      eligible,
 		}
 	}
 	if res.Synthesis != nil {
@@ -1305,8 +1333,9 @@ func (s *Server) callAgents(req *Request) Response {
 }
 
 // callModelsRefresh runs the read-only models_refresh tool: probe every agent
-// CLI for its available models and return the inventory plus HEURISTIC routing
-// proposals for models not yet in the static table. It never modifies routing.
+// CLI for its available models and return the inventory plus unmeasured
+// assessment requests for models not yet in the static table. It never infers
+// capability from names and never modifies routing.
 func (s *Server) callModelsRefresh(req *Request) Response {
 	return textResult(req.ID, modelscan.Refresh())
 }

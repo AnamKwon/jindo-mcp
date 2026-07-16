@@ -231,6 +231,24 @@ func TestWrapExecErr_nonExitErrorPassthrough(t *testing.T) {
 	}
 }
 
+// TestDefaultExecEmptyStdoutSurfacesStderr pins the headless-CLI failure mode
+// where a command exits zero but emits only a permission diagnostic on stderr.
+// Treating that as success would leave callers with an empty, unparseable
+// response and hide the actual reason the agent did no work.
+func TestDefaultExecEmptyStdoutSurfacesStderr(t *testing.T) {
+	a := NewAgy()
+	out, err := a.defaultExec([]string{"/bin/sh", "-c", "printf 'mcp permission denied' >&2"})
+	if err == nil {
+		t.Fatal("defaultExec error = nil, want stderr-only success to be surfaced")
+	}
+	if out != "" {
+		t.Fatalf("defaultExec output = %q, want empty stdout", out)
+	}
+	if !strings.Contains(err.Error(), "mcp permission denied") {
+		t.Fatalf("defaultExec error = %q, want stderr diagnostic", err.Error())
+	}
+}
+
 // TestAvailable exercises the PATH-probe availability check. It cannot assert a
 // specific true/false for the real CLIs (they may or may not be installed on
 // the machine running the test), so it only asserts the known agents run

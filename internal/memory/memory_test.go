@@ -11,6 +11,27 @@ import (
 	"time"
 )
 
+func TestNewCanonicalizesRelativeRoot(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "nested")
+	rel, err := filepath.Rel(cwd, target)
+	if err != nil {
+		t.Fatalf("Rel: %v", err)
+	}
+
+	m := New(rel)
+	want, err := filepath.Abs(rel)
+	if err != nil {
+		t.Fatalf("Abs: %v", err)
+	}
+	if m.Root() != want {
+		t.Fatalf("Root() = %q, want canonical absolute path %q", m.Root(), want)
+	}
+}
+
 func TestWriteReadRoundTrip(t *testing.T) {
 	m := New(t.TempDir())
 	if err := m.Write("k", "v1", "alice"); err != nil {

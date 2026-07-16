@@ -12,6 +12,7 @@ import (
 // IS already routed for agy ("Gemini 3.1 Pro (High)"), so a test can assert the
 // existing one is not proposed while the new ones are.
 const sampleAgyModels = `Gemini 3.1 Pro (High)
+Gemini 3.5 Flash (Medium)
 GPT-OSS 120B (Medium)
 Claude Opus 4.6 (Thinking)
 `
@@ -86,7 +87,7 @@ func TestProbe(t *testing.T) {
 	if agy.Source != "enumerated" {
 		t.Errorf("agy source = %q, want enumerated", agy.Source)
 	}
-	wantModels := []string{"Gemini 3.1 Pro (High)", "GPT-OSS 120B (Medium)", "Claude Opus 4.6 (Thinking)"}
+	wantModels := []string{"Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (Medium)", "GPT-OSS 120B (Medium)", "Claude Opus 4.6 (Thinking)"}
 	if strings.Join(agy.Available, "|") != strings.Join(wantModels, "|") {
 		t.Errorf("agy available = %v, want %v", agy.Available, wantModels)
 	}
@@ -128,15 +129,18 @@ func TestClassify(t *testing.T) {
 	defer withStubbedRun(t, false)()
 
 	agents := Probe()
-	proposals := Classify(agents, routing.AgentsModels())
+	proposals := Classify(agents, routing.AgentsModels(), routing.CapabilityModelCatalog()...)
 
 	// The already-routed agy model must NOT be proposed.
 	if _, ok := findProposal(proposals, "Gemini 3.1 Pro (High)"); ok {
 		t.Errorf("Gemini 3.1 Pro (High) is in the routing table and must not be proposed")
 	}
+	if _, ok := findProposal(proposals, "Gemini 3.5 Flash (Medium)"); ok {
+		t.Errorf("Gemini 3.5 Flash (Medium) is in the capability catalog and must not be proposed")
+	}
 
-	// GPT-OSS 120B (Medium): "oss" (trivial) is checked before hard keywords,
-	// so it lands trivial with effort from routing.
+	// A new model is reported without inferring capability from "OSS", "120B",
+	// or its advertised size.
 	oss, ok := findProposal(proposals, "GPT-OSS 120B (Medium)")
 	if !ok {
 		t.Fatalf("GPT-OSS 120B (Medium) not proposed")
@@ -144,29 +148,20 @@ func TestClassify(t *testing.T) {
 	if !oss.New {
 		t.Errorf("GPT-OSS proposal New = false, want true")
 	}
-	if oss.ProposedTier != "trivial" {
-		t.Errorf("GPT-OSS tier = %q, want trivial", oss.ProposedTier)
-	}
-	if oss.ProposedEffort != routing.EffortForDifficulty("trivial") {
-		t.Errorf("GPT-OSS effort = %q, want %q", oss.ProposedEffort, routing.EffortForDifficulty("trivial"))
+	if oss.EvidenceStatus != "unmeasured_new_model" || len(oss.RequiredAssessment) == 0 {
+		t.Errorf("GPT-OSS assessment = %+v", oss)
 	}
 	if oss.Agent != "agy" {
 		t.Errorf("GPT-OSS agent = %q, want agy", oss.Agent)
 	}
 
-	// Claude Opus 4.6 (Thinking): no trivial keyword, "opus" -> hard.
+	// "Opus" and "Thinking" likewise do not become a hard-tier rule.
 	opus, ok := findProposal(proposals, "Claude Opus 4.6 (Thinking)")
 	if !ok {
 		t.Fatalf("Claude Opus 4.6 (Thinking) not proposed")
 	}
-	if opus.ProposedTier != "hard" {
-		t.Errorf("Opus tier = %q, want hard", opus.ProposedTier)
-	}
-	if opus.ProposedEffort != routing.EffortForDifficulty("hard") {
-		t.Errorf("Opus effort = %q, want %q", opus.ProposedEffort, routing.EffortForDifficulty("hard"))
-	}
-	if !strings.Contains(opus.Reason, "opus") {
-		t.Errorf("Opus reason %q should record the matched keyword", opus.Reason)
+	if opus.EvidenceStatus != "unmeasured_new_model" || !strings.Contains(opus.Reason, "name and size do not imply") {
+		t.Errorf("Opus assessment = %+v", opus)
 	}
 
 	// codex's active model gpt-5.5 is already the codex "hard" model in the

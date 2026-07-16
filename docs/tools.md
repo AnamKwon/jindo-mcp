@@ -10,7 +10,7 @@ descriptions live in the tool definitions in `internal/mcp/mcp.go`.
 
 | tool | description (first sentence) |
 |------|------------------------------|
-| `route_capability` | Return decision support for an explicit capability cell without running a model: benchmark-bounded candidates, per-model observations/cautions, uncertainty, oracle checks, reviewer policy, and the host selection contract. |
+| `route_capability` | Return host decision support without running a model: exact priors, analogous evidence with transfer warnings, the eligible policy catalog, task signals, evidence gaps, oracle checks, and reviewer policy. |
 | `dispatch` | Run one explicitly selected model. |
 | `dispatch_async` | Dispatch a coding task in the background and return immediately with a job_id (does not wait for the result). |
 | `dispatch_multi` | Fan a task out to multiple models concurrently in read-only "propose" mode: each model returns its OWN complete candidate solution. |
@@ -24,6 +24,6 @@ descriptions live in the tool definitions in `internal/mcp/mcp.go`.
 | `plan_gate` | The autonomous loop's stop gate: runs the active plan's integration verify_cmds AND a read-only goal-met judge to decide whether the loop may terminate. |
 | `memory` | Read jindo shared memory: one key's value, or `{entries, insights}` when key is omitted. |
 | `agents` | List the agent → difficulty → model routing table, plus a per-agent map reporting whether each agent's CLI is installed. |
-| `models_refresh` | Probe each installed agent CLI for its actually-available models and return the inventory plus heuristic routing proposals. |
+| `models_refresh` | Probe each installed agent CLI for its actually-available models and report new models as unmeasured assessment requests without inferring a tier from their names. |
 | `compact` | Trigger memory compaction to bound the working set. |
 | `calibrate` | Aggregate dispatch.log into a routing calibration report. |
