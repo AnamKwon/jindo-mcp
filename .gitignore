@@ -16,3 +16,6 @@ bench/calibration/**
 !bench/calibration/*-routing-report.md
 !bench/calibration/*-2026-07-report.md
 !bench/calibration/*_analysis.md
+bench/results*.json
+bench/report*.md
+bench/routing_proposal.json
